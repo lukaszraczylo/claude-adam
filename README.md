@@ -106,4 +106,4 @@ Then remove the four `adam-*` hook entries from `~/.claude/settings.json`.
 
 ## License
 
-(add your preferred license)
+[MIT](LICENSE) — © 2026 Lukasz Raczylo
