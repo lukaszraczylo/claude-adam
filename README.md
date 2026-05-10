@@ -2,6 +2,13 @@
 
 Self-improvement layer for [Claude Code](https://claude.com/claude-code) that observes friction signals during your sessions and proposes targeted improvements (new skills, memory entries, agent edits) which you can review and apply.
 
+## What's new
+
+- **v0.3.1** — code review pass: bug fixes (`errorFingerprint` no longer false-positives on `is_error: false`, archive script handles same-millisecond duplicates correctly, `tool_window` now clears on session change, nudge filters proposal filenames by pattern), prose conciseness cuts, hardened `install.sh` with curl one-liner + settings.json merge, `adam-uninstall.sh`, isolated test harness (no longer pollutes live `~/.claude/adam/` state).
+- **v0.3.0** — causal diagnosis: every proposal carries a `# Diagnosis` block (Trigger/Action/Mismatch/Outcome with verbatim transcript quote) before drafting, plus optional `contradiction_flag` heuristic that vetoes auto-apply on obviously-conflicting `skill_edit` additions.
+- **v0.2.1** — win signals (`correction_free_streak`, `clean_recovery`) feed `skill_edit` auto-apply under a strict gate (≤30 LOC, ≤2× byte cap, 7d cooldown, 30d blacklist on rejection).
+- **v0.2.0** — actioned-entry archival via `adam-archive.mjs`; `cursor` field deprecated.
+
 ## What it does
 
 A lightweight Node.js hook (`adam-observe.mjs`) runs on `UserPromptSubmit`, `PreToolUse`, and `PostToolUse` events. It detects:
@@ -16,6 +23,8 @@ A lightweight Node.js hook (`adam-observe.mjs`) runs on `UserPromptSubmit`, `Pre
 | `edit_churn` | Same file edited 4× in a window |
 | `build_loop` | 2× build/test/compile commands fail in same session |
 | `subagent_dispatch_pattern` | Same subagent dispatched ≥3× cumulatively |
+| `correction_free_streak` | 5 clean UserPromptSubmits in a row (no correction phrase) — feeds `skill_edit` reinforcement |
+| `clean_recovery` | 3 clean PostToolUse events after a struggle signal — feeds `skill_edit` reinforcement |
 
 Detection is local, regex-based, zero LLM cost. Signals append to `~/.claude/adam/journal.jsonl`.
 
@@ -38,34 +47,64 @@ LLM coding sessions reveal repeated friction the moment you stop and look. ADAM 
 └── adam/
     ├── journal.jsonl         # append-only signal log (active observations)
     ├── journal/              # rotated daily logs + actioned-<id>.jsonl per applied/rejected proposal
-    ├── state.json            # per-session counters (cursor field is vestigial as of v0.2.0)
+    ├── state.json            # per-session counters
     ├── usage.json            # skill/agent invocation tallies + payload visibility counters
     ├── proposals/            # queued, awaiting review
     ├── applied/              # approved + auto-applied archive
     ├── rejected/             # rejected (with reason)
     ├── trash/                # soft-deleted artifacts (recoverable)
     ├── scripts/              # adam-archive.mjs (called by skill on apply/reject)
-    └── tests/run-tests.sh    # 21 verification tests
+    └── tests/run-tests.sh    # 27 verification tests (isolated tmpdir; never touches live state)
 ```
 
 ## Install
 
+### One-liner (recommended)
+
 ```sh
+curl -fsSL https://raw.githubusercontent.com/lukaszraczylo/claude-adam/main/install.sh | bash
+```
+
+Pin a release for reproducibility:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/lukaszraczylo/claude-adam/v0.3.1/install.sh \
+  | VERSION=v0.3.1 bash
+```
+
+The installer clones the repo to `/tmp`, copies files into `~/.claude/`, and offers to merge ADAM's hook entries into your `~/.claude/settings.json` (with a diff preview and `[y/N]` confirmation — your existing hooks are preserved). Pass `--yes` to skip the prompt; `--dry-run` to preview without writing.
+
+Requires `git`, `curl`, `jq`, and `node` 18+.
+
+### From a clone
+
+```sh
+git clone https://github.com/lukaszraczylo/claude-adam
+cd claude-adam
 ./install.sh
 ```
 
-The script copies files into `~/.claude/`. **It does NOT modify your `settings.json`** — wire the hook entries manually using `settings.json.example` as reference. Merging into existing settings prevents accidental clobber of your other hooks.
+### Upgrade-safe
 
-After install:
-1. Run the test suite: `bash ~/.claude/adam/tests/run-tests.sh` — must show `18 passed, 0 failed`.
-2. Add the hook entries from `settings.json.example` to `~/.claude/settings.json` (preserve your existing hooks; ADAM's are additive).
-3. Restart Claude Code, or just run `/reflect` to trigger the skill — Claude Code v2.1.0+ auto-hot-reloads user-level skills, no restart needed.
+These files are **never overwritten** if they already exist:
+
+- `~/.claude/adam/journal.jsonl` — your observation log
+- `~/.claude/adam/state.json` — session counters
+- `~/.claude/adam/usage.json` — invocation tallies
+
+If you've locally edited any installed file (e.g. `agents/adam.md`), the installer writes the new version to `<file>.adam-new` and warns you instead of clobbering.
+
+After install: run `bash ~/.claude/adam/tests/run-tests.sh` to verify (expect `27 passed, 0 failed`), start a fresh Claude Code session, then run `/reflect`.
 
 ## Requirements
 
 - Claude Code v2.1.0+ (for auto skill hot-reload; older versions need session restart after `skill_new` proposals are applied)
 - Node.js 18+ (for the hook; tested on v22)
-- Bash (for the test harness)
+- Bash 4+, `git`, `curl`, `jq` (for installer + test harness)
+
+### Platform support
+
+Tested on **macOS** (Darwin / BSD coreutils) and **Linux** (Alpine, glibc + musl). The install / uninstall / test scripts are written to be portable: `stat` uses BSD `-f` with GNU `-c` fallback, `mktemp -d -t prefix.XXXXXX` works on both, no GNU-only flags. CI smoke verified `27 passed, 0 failed` under `alpine:latest`.
 
 ## Confidence rubric
 
@@ -85,8 +124,16 @@ Sum:
 auto_apply_eligible requires ALL:
   confidence ≥ 4
   blast_radius == low
-  type ∈ {memory, skill_new}
+  type ∈ {memory, skill_new, skill_edit}     # skill_edit also passes the win-driven gate
   cross_session_evidence == true (single-session-only proposals always queue)
+
+skill_edit additionally requires (v0.2.1+):
+  win-signal evidence (correction_free_streak / clean_recovery cites target skill)
+  diff is append-only, ≤30 LOC, resulting size ≤2× original
+  no auto-edit to same target in past 7 days (cooldown)
+  no rejection-blacklist on target in past 30 days
+  contradiction heuristic does not flag (v0.3.0+)
+  # Diagnosis section present + structurally valid (v0.3.0+)
 ```
 
 ## Lifecycle: how proposals become permanent
@@ -108,9 +155,22 @@ Every proposal records the journal entry timestamps that fed its cluster (`sourc
 
 ## Uninstall
 
+One-shot:
+
 ```sh
-rm -rf ~/.claude/{hooks/adam-*.mjs,agents/adam.md,skills/adam-self-improvement,commands/reflect.md,adam}
+curl -fsSL https://raw.githubusercontent.com/lukaszraczylo/claude-adam/main/adam-uninstall.sh | bash
 ```
+
+The uninstaller archives `~/.claude/adam/` to `~/.claude/adam.bak.<ts>/` (preserving your journal/proposals data), removes ADAM files, and offers to strip ADAM hook entries from `~/.claude/settings.json` with a diff prompt. Pass `--yes` to skip the prompt; `--purge` to delete the data archive instead of preserving it.
+
+Manual:
+
+```sh
+mv ~/.claude/adam ~/.claude/adam.bak.$(date +%s)
+rm -f ~/.claude/hooks/adam-*.mjs ~/.claude/agents/adam.md ~/.claude/commands/reflect.md
+rm -rf ~/.claude/skills/adam-self-improvement
+```
+
 Then remove the four `adam-*` hook entries from `~/.claude/settings.json`.
 
 ## License

@@ -18,16 +18,9 @@ You MUST obey these on every proposal:
 4. **Verifiable success criterion** — every proposal has a `# Success criterion` section describing a runnable check.
 5. **Naive then optimize** — first proposal for a pattern is the boring obvious solution.
 
-## Inputs (passed in dispatch prompt)
+## Inputs
 
-- `journal_path`: `~/.claude/adam/journal.jsonl`
-- `state_path`: `~/.claude/adam/state.json` (cursor)
-- `usage_path`: `~/.claude/adam/usage.json`
-- `proposals_dir`: `~/.claude/adam/proposals/`
-- `applied_dir`: `~/.claude/adam/applied/`
-- `rejected_dir`: `~/.claude/adam/rejected/`
-- `transcripts_root`: `~/.claude/projects/`
-- `skills_root`: `~/.claude/skills/`
+Paths arrive via the dispatch prompt — see `~/.claude/skills/adam-self-improvement/SKILL.md` §1.
 
 ## Signal types
 
@@ -89,7 +82,7 @@ The hook emits these `type` values into the journal:
    g. Apply feedback bias (step 1e) and multi-axis bonus.
    h. **Record `source_entries`**: list every journal entry timestamp that fed this cluster. Goes in proposal frontmatter as a YAML block-form array (one `- "<ts>"` per line). The skill consumes this on apply/reject to archive matching entries out of `journal.jsonl` and into `journal/actioned-<id>.jsonl`.
    i. Emit proposal file to `proposals_dir/`.
-7. Emit punch list to stdout (last message): `{"new":N, "high_confidence":[...], "queued":[...], "skipped":[...]}`. The `cursor` field in `state.json` is vestigial as of v0.2.0 — do not read or write it.
+7. Emit punch list to stdout (last message): `{"new":N, "high_confidence":[...], "queued":[...], "skipped":[...]}`.
 
 ## Skill overlap rule
 
@@ -144,10 +137,6 @@ Constraints:
 - ≤80 lines of body content. Karpathy "Surgical".
 - Slug MUST NOT collide with any existing skill name in `skills_root`.
 
-When the main thread applies a `skill_new` proposal:
-1. Creates `~/.claude/skills/<slug>/` directory.
-2. Writes the `# Proposed change` body to `<slug>/SKILL.md`.
-3. Tells the user: "skill `<slug>` written. Activates immediately on next user turn (CC v2.1.0+ auto-hot-reload)."
 
 ## Memory drafting protocol (for `memory` proposals)
 
@@ -236,10 +225,9 @@ A `skill_edit` proposal sets `auto_apply_eligible: true` ONLY when ALL hold:
 6. Resulting SKILL.md size ≤ 2× current size. Record both byte counts in frontmatter fields `bytes_before`, `bytes_after`.
 7. No entry in `applied_dir/` for the same `target` with `last_auto_edit` newer than 7 days ago (cooldown).
 8. No entry in `rejected_dir/` for this `target` with `auto_apply_blacklist: true` newer than 30 days ago.
+9. **Contradiction check passes.** Tokenize both the existing SKILL.md and the new appended section per the same tokenizer + stopword list as the skill-overlap rule. Search for negation tokens (`never`, `not`, `no`, `don't`, `avoid`, `forbid`, `stop`, `disable`) in the existing content; take a 6-token window around each match. If the new section contains an assertion token (`always`, `must`, `should`, `do`, `enable`, `yes`) whose surrounding 6-token window shares ≥2 content tokens with the existing negation window → flag as contradiction. Repeat in the inverse direction (negations in new section vs assertions in existing). On any flag: set `auto_apply_eligible: false` and add frontmatter field `contradiction_flag: "<one-line summary naming the negation token, the conflicting tokens, and the line in existing content where the negation appears>"`. Heuristic only — false positives queue for review, never silently auto-apply.
 
-If any of (3)–(8) fails: still emit the proposal, but `auto_apply_eligible: false` — main thread queues for review.
-
-Win clusters do NOT override struggle clusters: a single `clean_recovery` cannot turn a `correction` cluster into a `skill_edit`. Struggle paths and win paths are independent.
+If any of (3)–(9) fails: still emit the proposal, but `auto_apply_eligible: false` — main thread queues for review.
 
 ## Confidence rubric (deterministic — do NOT vibe)
 
@@ -250,9 +238,7 @@ Sum:
 - Multi-axis cluster (≥2 distinct struggle types in same session): **+1**
 - Type-bias penalty from feedback loop (≥3 rejections, applied:rejected ratio <1:2 for this `type`): **-1**
 - Diagnosis flags `Mismatch: unclear` (causation could not be reconstructed from transcript context): **-1**
-- Blast radius low (memory file or new isolated skill): **+1**
-- Blast radius medium (new agent, new hook, edit existing skill): **0**
-- Blast radius high (CLAUDE.md, settings.json hooks, edit agent, deletion): **-1**
+- Blast radius: low **+1**, medium **0**, high **-1** (default per type — see Proposal types table)
 - Surgical (one file, ≤50 LOC for non-skill_new; ≤80 LOC for skill_new): **+1**
 - Touches deny-list (settings.json hooks/permissions, CLAUDE.md, deletions): **-3**
 
@@ -317,6 +303,8 @@ source_entries:
 win_evidence: "<ts of triggering clean_recovery or correction_free_streak entry>"
 bytes_before: <int>
 bytes_after: <int>
+# skill_edit only — populated when contradiction heuristic flags a conflict (sets auto_apply_eligible: false)
+contradiction_flag: "<one-line summary or null>"
 # optional — auto-populated from Diagnosis Mismatch line
 diagnosis_summary: "<≤120 chars, single sentence>"
 ---
@@ -337,8 +325,8 @@ diagnosis_summary: "<≤120 chars, single sentence>"
 <for memory: full memory file body (frontmatter + content)>
 <for others: unified diff or full file content; for deletion: soft-delete command>
 
-# Overlap   (skill_edit only)
-<existing skill id, rule matched (name|description), overlapping tokens>
+# Overlap
+<conditional — see Skill overlap rule §6: only emitted for `skill_edit` proposals>
 
 # Success criterion
 <runnable check>
@@ -356,11 +344,8 @@ Print a single JSON line to stdout:
 
 ## What you must NOT do
 
-- Do not read full transcripts — ~20 messages base context per cluster, +30 for skill_new solution synthesis (50 total cap).
 - Do not call other agents.
 - Do not write to `~/.claude/skills/`, `~/.claude/agents/`, `settings.json`, `CLAUDE.md`, or any existing skill/agent file directly. All changes go through proposal files for main-thread review and apply.
 - Do not delete files. Deletion proposals describe a soft-move; the main thread executes it.
 - Do not write outside `proposals_dir/` and `state_path`.
-- Do not propose anything matching a `rejected/` entry (≥2 token overlap with rejection's `# Why`).
 - Do not invent trigger phrases for `skill_new` — every trigger must come from observed user input.
-- Do not stack the cross-session and single-session repetition bonuses — pick whichever qualifies, never both.

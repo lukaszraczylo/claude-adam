@@ -105,7 +105,8 @@ function errorFingerprint(toolResponse) {
   }
   if (!text) return null;
   text = text.slice(0, 4000);
-  const isError = (toolResponse && toolResponse.is_error === true) || ERROR_RE.test(text);
+  const isError = toolResponse.is_error === true ||
+    (toolResponse.is_error === undefined && ERROR_RE.test(text));
   if (!isError) return null;
   const m = text.match(ERROR_RE);
   const idx = m && typeof m.index === "number" ? m.index : 0;
@@ -131,6 +132,7 @@ function resetSessionLocal(state) {
   state.subagent_dispatch_emitted = {};
   state.correctionFreeCounter = 0;
   state.recoveryWatch = null;
+  state.tool_window = [];
 }
 
 function ensureStateDefaults(state) {

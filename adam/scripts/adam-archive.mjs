@@ -81,15 +81,20 @@ function main() {
   }
 
   const lines = readFileSync(JOURNAL, "utf8").split("\n").filter(Boolean);
-  const tsSet = new Set(sourceEntries);
+  // tsCounts: how many entries with this ts the proposal claims as its own.
+  // Same-millisecond duplicates: only consume up to the recorded count.
+  const tsCounts = new Map();
+  for (const ts of sourceEntries) tsCounts.set(ts, (tsCounts.get(ts) || 0) + 1);
   const matched = [];
   const remaining = [];
 
   for (const line of lines) {
     try {
       const e = JSON.parse(line);
-      if (e.ts && tsSet.has(e.ts)) {
+      const remainingCount = e.ts ? (tsCounts.get(e.ts) || 0) : 0;
+      if (remainingCount > 0) {
         matched.push(line);
+        tsCounts.set(e.ts, remainingCount - 1);
       } else {
         remaining.push(line);
       }

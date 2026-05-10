@@ -5,8 +5,6 @@ description: Use when the user types /reflect, asks "what has adam learned", ask
 
 # adam-self-improvement
 
-You are about to drive a review session for ADAM, the self-improvement layer. You operate in the **main thread** with the user present. The `adam` subagent does the heavy analysis; you orchestrate.
-
 ## When to invoke
 
 - User types `/reflect`
@@ -59,7 +57,6 @@ For each id in `high_confidence`:
     7. Re-stat target. If new size exceeds `2 * current_bytes` (captured in step 2), revert via `Edit` (remove the just-appended section) and refuse — print refusal reason.
     8. Add `last_auto_edit: <iso8601 utc now>` to the proposal frontmatter before moving it.
     9. Tell user: "skill `<slug>` extended (added <N> lines) — auto-applied via win-evidence gate."
-  - **For other types under auto-apply**: apply via Write/Edit per `# Proposed change`. (Note: only `memory`, `skill_new`, and `skill_edit` qualify for auto-apply per the rubric.)
 - Move proposal to `~/.claude/adam/applied/<UTC-ts>-<id>.md`.
 - **Archive consumed journal entries**: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/applied/<UTC-ts>-<id>.md` — moves entries listed in proposal's `source_entries` from `journal.jsonl` to `journal/actioned-<id>.jsonl` so subsequent `/reflect` runs do not re-cluster them.
 
@@ -112,6 +109,7 @@ Before writing any proposal:
 - For `deletion`: confirm both criteria (a) and (b) from the agent's special handling are documented in the proposal.
 - For `skill_new`: confirm the slug doesn't collide with any existing skill in `~/.claude/skills/`. If it does, refuse and ask user to rename.
 - For `skill_edit`: confirm the diff is append-only (no `-` lines that remove existing content) and that target SKILL.md exists. When auto-applying, ALSO re-verify the eligibility gate steps in §2 (cooldown, blacklist, byte cap) before any `Edit` call — never trust frontmatter alone.
+- For `skill_edit` with `auto_apply_eligible: true`: confirm `contradiction_flag` is absent or null in frontmatter. Refuse auto-apply if `contradiction_flag` is set with any non-empty value (treat the agent's flag as a hard veto on auto-apply; user can still manually approve in walk-the-queue if they disagree with the heuristic).
 - For `memory`: confirm `# Proposed change` body starts with `---` frontmatter containing required fields `name`, `description`, `type`, `originSessionId`. Refuse if frontmatter missing — agent must redraft per the Memory drafting protocol.
 - Confirm `source_entries` is present in proposal frontmatter as a non-empty list (used for archive). Warn (do not refuse) if missing — legacy proposals from before v0.2.0 won't have it.
 
