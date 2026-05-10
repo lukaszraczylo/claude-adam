@@ -44,9 +44,10 @@ For each id in `high_confidence`:
 - Verify in front of the user: print `id`, `target`, `confidence`, `blast_radius`, `cross_session_evidence`, `auto_apply_eligible`.
 - Apply the change:
   - **For `skill_new`**: `mkdir -p ~/.claude/skills/<slug>/`, then `Write` the proposal's `# Proposed change` body to `~/.claude/skills/<slug>/SKILL.md`. After write, print: "skill `<slug>` written to `~/.claude/skills/<slug>/SKILL.md` — activates immediately — Claude Code v2.1.0+ auto-hot-reloads user-level skills, no restart needed."
-  - **For `memory`**: `Write` the proposal's `# Proposed change` body to the path in `target` (under `~/.claude/projects/<encoded-home>/memory/`, where `<encoded-home>` is the user's home dir with `/` replaced by `-`, e.g. `-Users-alice` on macOS). Then update `MEMORY.md` index with a one-line pointer.
+  - **For `memory`**: `Write` the proposal's `# Proposed change` body (which MUST include the auto-memory frontmatter — see "Memory drafting protocol" in `agents/adam.md`) to the path in `target` (under `~/.claude/projects/<encoded-home>/memory/`, where `<encoded-home>` is the user's home dir with `/` replaced by `-`, e.g. `-Users-alice` on macOS). Then update `MEMORY.md` index with a one-line pointer.
   - **For other types under auto-apply**: apply via Write/Edit per `# Proposed change`. (Note: only `memory` and `skill_new` qualify for auto-apply per the rubric.)
 - Move proposal to `~/.claude/adam/applied/<UTC-ts>-<id>.md`.
+- **Archive consumed journal entries**: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/applied/<UTC-ts>-<id>.md` — moves entries listed in proposal's `source_entries` from `journal.jsonl` to `journal/actioned-<id>.jsonl` so subsequent `/reflect` runs do not re-cluster them.
 
 Print: `auto-applied N proposals: [ids]`.
 
@@ -61,10 +62,11 @@ c. On **approve**:
    - For `deletion`: `mkdir -p ~/.claude/adam/trash/<ts>` then `mv` the artifact into it. Print restoration command.
    - For `skill_new`: `mkdir -p ~/.claude/skills/<slug>/`, then write `# Proposed change` body to `<slug>/SKILL.md`. Tell user: "skill `<slug>` written — activates immediately (CC v2.1.0+ auto-hot-reload)."
    - For `skill_edit`: apply the unified diff in `# Proposed change` to the existing SKILL.md at `target` (append-only — never replace existing content).
-   - For `memory`: write to `target` and update `MEMORY.md` index.
+   - For `memory`: write `# Proposed change` body (must include auto-memory frontmatter) to `target` and update `MEMORY.md` index with a one-line pointer.
    - For all others: apply via Write/Edit per the proposal's `# Proposed change`.
    - Move proposal to `~/.claude/adam/applied/<ts>-<id>.md`.
-d. On **reject**: ask for reason in one line. Append `# Reason\n<reason>` to proposal body. Move to `~/.claude/adam/rejected/<id>.md`.
+   - Archive: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/applied/<ts>-<id>.md`.
+d. On **reject**: ask for reason in one line. Append `# Reason\n<reason>` to proposal body. Move to `~/.claude/adam/rejected/<id>.md`. Archive: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/rejected/<id>.md`.
 e. On **edit**: ask the user for the change, edit the proposal in place, then loop back to step 3a for that same id.
 
 ### 4. Handle failures
@@ -95,6 +97,8 @@ Before writing any proposal:
 - For `deletion`: confirm both criteria (a) and (b) from the agent's special handling are documented in the proposal.
 - For `skill_new`: confirm the slug doesn't collide with any existing skill in `~/.claude/skills/`. If it does, refuse and ask user to rename.
 - For `skill_edit`: confirm the diff is append-only (no `-` lines that remove existing content) and that target SKILL.md exists.
+- For `memory`: confirm `# Proposed change` body starts with `---` frontmatter containing required fields `name`, `description`, `type`, `originSessionId`. Refuse if frontmatter missing — agent must redraft per the Memory drafting protocol.
+- Confirm `source_entries` is present in proposal frontmatter as a non-empty list (used for archive). Warn (do not refuse) if missing — legacy proposals from before v0.2.0 won't have it.
 
 If any check fails, refuse to apply and ask the user how to proceed.
 

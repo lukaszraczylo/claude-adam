@@ -46,17 +46,18 @@ The hook emits these `type` values into the journal:
 
 ## Process
 
-1. Read `state.json` → `cursor` (number of journal lines already processed).
-2. Read `journal.jsonl`. New observations = lines after `cursor`.
-3. If 0 new lines, emit punch list `{"new":0}` and stop.
-4. **Build feedback context** (run once per `/reflect`):
-   a. List `rejected_dir/` filenames. Parse each `# Why` and `# Reason` sections. Build a set of rejected ideas (token-tokenized for similarity matching).
-   b. List `applied_dir/` filenames. Parse frontmatter `type` and `target`. Tally `applied_by_type[type]` and `applied_by_target[basename(target)]`.
-   c. From these, compute **type biases**:
+1. **Build feedback context** (run once per `/reflect`):
+   a. List `rejected_dir/` filenames. Parse each frontmatter `source_entries` (if present), `# Why` and `# Reason` sections.
+   b. List `applied_dir/` filenames. Parse each frontmatter `type`, `target`, `source_entries`. Tally `applied_by_type[type]`.
+   c. Compute the **excluded-timestamps set**: union of all `source_entries` arrays across `applied_dir/` + `rejected_dir/`. Journal entries with these `ts` values have already been actioned and MUST NOT be re-clustered.
+   d. Build the **rejected-ideas set** (token-tokenized `# Why` content) for fuzzy fallback matching when a new cluster topic resembles a rejected one but doesn't share `source_entries` (handles legacy proposals without `source_entries`).
+   e. Compute **type biases**:
       - Types with applied:rejected ratio >2:1 (over ≥3 total): neutral, no bonus.
       - Types with applied:rejected ratio <1:2 (over ≥3 rejections): **-1 confidence penalty**, recorded in proposal `# Why` as "type-bias-penalty: <reason>".
-5. Cluster new observations:
-   - `correction`: tokenize phrase (drop stopwords, keep content tokens). Phrases sharing ≥2 content tokens collapse into one cluster — regardless of `prev_tool` or `cwd`. Record distinct cwds in cluster (used for CLAUDE.md eligibility).
+2. Read `journal.jsonl`. Filter out entries whose `ts` is in the excluded-timestamps set. The result = **active observations**.
+3. If 0 active observations, emit punch list `{"new":0}` and stop.
+4. Cluster active observations:
+   - `correction`: tokenize phrase (drop stopwords, keep content tokens). Phrases sharing ≥2 content tokens collapse into one cluster — regardless of `prev_tool` or `cwd`. Record distinct cwds (used for CLAUDE.md eligibility).
    - `retry_loop`: cluster by `tool`.
    - `weak_agent`: cluster by `subagent_type`.
    - `tool_error_loop`: cluster by `fp`.
@@ -64,26 +65,26 @@ The hook emits these `type` values into the journal:
    - `edit_churn`: cluster by file basename pattern (e.g. `*.test.ts`).
    - `build_loop`: cluster by `session`.
    - `subagent_dispatch_pattern`: cluster by `subagent_type`.
-6. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
-7. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types `tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
-   a. If cluster topic matches a rejected idea (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.
+5. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
+6. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
+   a. If cluster topic matches a rejected idea via the rejected-ideas fuzzy set (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.
    b. Pull ~20 messages of transcript context from `transcripts_root` to enrich. Never read full transcripts.
-   c. **Solution synthesis** (when type would be `skill_new` AND cluster qualifies for proposal): pull additional ~30 messages of transcript window around the friction events (~50 messages total). Extract:
+   c. **Solution synthesis** (when candidate type is `skill_new` AND cluster qualifies): pull additional ~30 messages around friction events (~50 messages total). Extract:
       - Concrete trigger phrases the user says verbatim.
       - Tools / files involved.
       - Successful resolution patterns later in transcript (positive endorsement).
       - Counterexamples (false-positive triggers to exclude).
-   d. **Skill overlap check** (skill_new candidates only): see "Skill overlap rule" below. If overlap qualifies, switch type to `skill_edit` targeting the matched SKILL.md.
+   d. **Skill overlap check** (`skill_new` only): see "Skill overlap rule". If overlap qualifies, switch type to `skill_edit` targeting matched SKILL.md.
    e. **Draft full content**:
-      - `skill_new`: draft the complete SKILL.md per "Skill drafting protocol" below. `# Proposed change` contains the full file body.
-      - `skill_edit`: draft an append-only unified diff per "Skill overlap rule".
-      - `memory`: draft full memory file content (frontmatter + body).
-      - Other types: per existing rules (unified diff or full content).
+      - `skill_new`: complete SKILL.md per "Skill drafting protocol".
+      - `skill_edit`: append-only unified diff per "Skill overlap rule".
+      - `memory`: complete memory file per "Memory drafting protocol".
+      - Other: per existing rules (unified diff or full content).
    f. Score against rubric → `confidence`, `blast_radius`, `cross_session_evidence`, `multi_axis`, `auto_apply_eligible`.
-   g. Apply feedback bias (step 4c) and multi-axis bonus.
-   h. Emit proposal file to `proposals_dir/`.
-8. Update `cursor` in `state.json` to new line count.
-9. Emit punch list to stdout (last message): `{"new":N, "high_confidence":[...], "queued":[...], "skipped":[...]}`.
+   g. Apply feedback bias (step 1e) and multi-axis bonus.
+   h. **Record `source_entries`**: list every journal entry timestamp that fed this cluster. Goes in proposal frontmatter as a YAML block-form array (one `- "<ts>"` per line). The skill consumes this on apply/reject to archive matching entries out of `journal.jsonl` and into `journal/actioned-<id>.jsonl`.
+   i. Emit proposal file to `proposals_dir/`.
+7. Emit punch list to stdout (last message): `{"new":N, "high_confidence":[...], "queued":[...], "skipped":[...]}`. The `cursor` field in `state.json` is vestigial as of v0.2.0 — do not read or write it.
 
 ## Skill overlap rule
 
@@ -142,6 +143,34 @@ When the main thread applies a `skill_new` proposal:
 1. Creates `~/.claude/skills/<slug>/` directory.
 2. Writes the `# Proposed change` body to `<slug>/SKILL.md`.
 3. Tells the user: "skill `<slug>` written. Activates immediately on next user turn (CC v2.1.0+ auto-hot-reload)."
+
+## Memory drafting protocol (for `memory` proposals)
+
+Every `memory` proposal's `# Proposed change` section MUST contain the COMPLETE memory file body — frontmatter + content — that will be written to the target path under `~/.claude/projects/<encoded-home>/memory/<slug>.md`.
+
+Required structure:
+
+```markdown
+---
+name: <human-readable name, ≤80 chars>
+description: <one-line description used to decide future relevance — be specific, ≤200 chars>
+type: user | feedback | project | reference
+originSessionId: <session_id from journal entries that fed this cluster>
+---
+
+<Body content per type, see CLAUDE.md memory schema:
+  - feedback: lead with the rule, then **Why:** line, then **How to apply:** line.
+  - project: lead with fact/decision, then **Why:** and **How to apply:** lines.
+  - user: brief description of role/preference/knowledge.
+  - reference: pointer to external system + what's there.>
+```
+
+Constraints:
+- Frontmatter fields `name`, `description`, `type` are **required**. Skill enforces this at apply time.
+- `originSessionId` is required — must be a `session` value from one of the cluster's journal entries.
+- ≤50 LOC of body content. Surgical.
+- Slug (used in `target` path filename) must not collide with any existing memory file.
+- For `type=feedback` and `type=project`, body MUST contain `**Why:**` and `**How to apply:**` lines (CLAUDE.md memory schema).
 
 ## Confidence rubric (deterministic — do NOT vibe)
 
@@ -210,6 +239,10 @@ cross_session_evidence: true | false
 multi_axis: true | false
 auto_apply_eligible: true | false
 status: queued
+source_entries:
+  - "<journal entry ts that fed this cluster>"
+  - "<another ts>"
+  - "..."
 ---
 
 # Why

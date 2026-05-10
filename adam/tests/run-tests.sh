@@ -215,6 +215,70 @@ else
   echo "  PASS: build_loop correctly ignored non-build command"; PASS=$((PASS+1))
 fi
 
+# --- Test 17: adam-archive moves matching entries to actioned file ---
+echo "Test 17: adam-archive moves matching journal entries"
+ARCHIVE="$HOME/.claude/adam/scripts/adam-archive.mjs"
+reset_state
+rm -f "$ROOT/journal/actioned-test-archive-001.jsonl"
+cat > "$ROOT/journal.jsonl" <<EOF
+{"ts":"2026-01-01T00:00:00Z","session":"sX","type":"correction"}
+{"ts":"2026-01-02T00:00:00Z","session":"sX","type":"correction"}
+{"ts":"2026-01-03T00:00:00Z","session":"sX","type":"dead_end"}
+EOF
+mkdir -p /tmp/adam-test-17
+cat > /tmp/adam-test-17/proposal.md <<EOF
+---
+id: test-archive-001
+type: memory
+target: /tmp/test
+confidence: 5
+blast_radius: low
+auto_apply_eligible: false
+status: applied
+source_entries:
+  - "2026-01-01T00:00:00Z"
+  - "2026-01-02T00:00:00Z"
+---
+# Why
+test
+EOF
+node "$ARCHIVE" /tmp/adam-test-17/proposal.md >/dev/null 2>&1 || true
+remaining=$(wc -l < "$ROOT/journal.jsonl" | tr -d ' ')
+archived=$(wc -l < "$ROOT/journal/actioned-test-archive-001.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
+if [ "$remaining" = "1" ] && [ "$archived" = "2" ]; then
+  echo "  PASS: archive moved 2 matching, kept 1 unmatched"; PASS=$((PASS+1))
+else
+  echo "  FAIL: expected 1 remaining + 2 archived, got $remaining + $archived"; FAIL=$((FAIL+1))
+fi
+rm -rf /tmp/adam-test-17 "$ROOT/journal/actioned-test-archive-001.jsonl"
+
+# --- Test 18: adam-archive no-op when source_entries missing ---
+echo "Test 18: adam-archive no-op when source_entries missing"
+reset_state
+echo '{"ts":"2026-01-01T00:00:00Z","type":"correction"}' > "$ROOT/journal.jsonl"
+mkdir -p /tmp/adam-test-18
+cat > /tmp/adam-test-18/proposal.md <<EOF
+---
+id: test-noop-002
+type: memory
+---
+# Why
+no source_entries
+EOF
+node "$ARCHIVE" /tmp/adam-test-18/proposal.md >/dev/null 2>&1 || true
+if [ -f "$ROOT/journal/actioned-test-noop-002.jsonl" ]; then
+  echo "  FAIL: archive file created when no source_entries"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: no archive file created"; PASS=$((PASS+1))
+fi
+remaining=$(wc -l < "$ROOT/journal.jsonl" | tr -d ' ')
+if [ "$remaining" = "1" ]; then
+  echo "  PASS: journal unchanged"; PASS=$((PASS+1))
+else
+  echo "  FAIL: journal modified ($remaining lines, expected 1)"; FAIL=$((FAIL+1))
+fi
+rm -rf /tmp/adam-test-18
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]

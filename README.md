@@ -36,15 +36,16 @@ LLM coding sessions reveal repeated friction the moment you stop and look. ADAM 
 ├── skills/adam-self-improvement/SKILL.md  # /reflect protocol
 ├── commands/reflect.md       # /reflect slash command
 └── adam/
-    ├── journal.jsonl         # append-only signal log
-    ├── journal/              # rotated daily logs (>5 MB threshold)
-    ├── state.json            # cursor + per-session counters
-    ├── usage.json            # skill/agent invocation tallies
+    ├── journal.jsonl         # append-only signal log (active observations)
+    ├── journal/              # rotated daily logs + actioned-<id>.jsonl per applied/rejected proposal
+    ├── state.json            # per-session counters (cursor field is vestigial as of v0.2.0)
+    ├── usage.json            # skill/agent invocation tallies + payload visibility counters
     ├── proposals/            # queued, awaiting review
     ├── applied/              # approved + auto-applied archive
     ├── rejected/             # rejected (with reason)
     ├── trash/                # soft-deleted artifacts (recoverable)
-    └── tests/run-tests.sh    # 18 verification tests
+    ├── scripts/              # adam-archive.mjs (called by skill on apply/reject)
+    └── tests/run-tests.sh    # 21 verification tests
 ```
 
 ## Install
@@ -71,7 +72,7 @@ After install:
 ```
 Sum:
 +2  Signal repeated ≥3× across ≥2 sessions
-+2  Struggle signal repeated ≥3× within a single session (does not stack with above)
++2  Struggle signal appearing ≥1× within a single session (does not stack)
 +2  Transcript contains positive endorsement near related action
 +1  Multi-axis cluster (≥2 distinct struggle types in same session)
 -1  Type-bias penalty (≥3 rejections, applied:rejected <1:2)
@@ -87,6 +88,14 @@ auto_apply_eligible requires ALL:
   type ∈ {memory, skill_new}
   cross_session_evidence == true (single-session-only proposals always queue)
 ```
+
+## Lifecycle: how proposals become permanent
+
+Every proposal records the journal entry timestamps that fed its cluster (`source_entries` in frontmatter). When you apply or reject a proposal, the skill calls `adam/scripts/adam-archive.mjs` which moves matching entries from `journal.jsonl` to `journal/actioned-<id>.jsonl`. Effects:
+
+- The `journal.jsonl` stays bounded by **active** observations only.
+- The next `/reflect` reads applied/ + rejected/ frontmatter, builds an excluded-timestamps set, and skips any leftover journal entries that were already actioned.
+- Rule changes (e.g. lowering a threshold) immediately re-evaluate the remaining active observations — no manual cursor rewind needed.
 
 ## What it will not do
 
