@@ -73,6 +73,7 @@ The hook emits these `type` values into the journal:
 6. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
    a. If cluster topic matches a rejected idea via the rejected-ideas fuzzy set (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.
    b. Pull ~20 messages of transcript context from `transcripts_root` to enrich. Never read full transcripts.
+   b1. **Causal diagnosis** (required for every proposal type): from the pulled context, draft a `# Diagnosis` block per the "Diagnosis drafting protocol". Cite ≥1 verbatim transcript quote within the `source_entries` window. If causation cannot be reconstructed, write `Mismatch: unclear` and apply `-1` confidence (rubric penalty). Diagnosis writes the proposal's narrative *before* the proposal body is drafted in step 6e.
    c. **Solution synthesis** (when candidate type is `skill_new` AND cluster qualifies): pull additional ~30 messages around friction events (~50 messages total). Extract:
       - Concrete trigger phrases the user says verbatim.
       - Tools / files involved.
@@ -176,6 +177,53 @@ Constraints:
 - Slug (used in `target` path filename) must not collide with any existing memory file.
 - For `type=feedback` and `type=project`, body MUST contain `**Why:**` and `**How to apply:**` lines (CLAUDE.md memory schema).
 
+## Diagnosis drafting protocol (required for every proposal)
+
+Every proposal's body MUST include a `# Diagnosis` section between `# Why` and `# Assumptions`. It states the causal chain — *trigger → action → mismatch → outcome* — that motivates the proposed change, grounded in transcript evidence.
+
+Required structure (exactly four labelled lines):
+
+```markdown
+# Diagnosis
+
+**Trigger:** <what the user wanted / context the assistant was in — 1 sentence>
+**Action:** <what the assistant did — 1 sentence, name specific tools/files when relevant>
+**Mismatch:** <how the action diverged from the trigger — 1 sentence>
+**Outcome:** <what surfaced the mismatch — user correction quote, error message, dead end — must include ≥1 verbatim quote ≤80 chars from transcript, in backticks>
+```
+
+Constraints:
+
+1. ≤5 LOC of prose total.
+2. ≥1 verbatim transcript quote, max 80 chars, wrapped in backticks.
+3. The quote MUST appear within ~20 messages of one of the `source_entries` timestamps (transcript context window already pulled in step 6b).
+4. No speculation — if causation is unclear from available context, write `Mismatch: unclear — see Outcome` and the cluster takes a `-1` rubric penalty (see rubric).
+5. For win clusters (`correction_free_streak`, `clean_recovery`) where there is no failure: `Mismatch: None` is a valid value. Outcome cites the recovery quote or the silence ("no correction across N prompts" + closest journal `ts`).
+
+Example — struggle cluster:
+
+```markdown
+# Diagnosis
+
+**Trigger:** User asked to run Go tests in three different sessions, expected fresh results each time.
+**Action:** Assistant ran `go test ./...` without `-count=1` flag.
+**Mismatch:** Go's test cache returned stale passes from prior runs; assistant did not invalidate.
+**Outcome:** User corrected with `"no use go test -count=1"` (s-aaa, 2026-05-10T10:00).
+```
+
+Example — win cluster:
+
+```markdown
+# Diagnosis
+
+**Trigger:** Bash commands failed 3× with the same fingerprint; user did not intervene.
+**Action:** Assistant switched from Bash to `Read` + `Edit` for the same goal, finished without further error.
+**Mismatch:** None — recovery confirms the alternate tool is the right path here.
+**Outcome:** Three clean PostToolUse events after the loop (`recovered_from: tool_error_loop`, s-bbb).
+```
+
+After drafting the four lines, set proposal frontmatter `diagnosis_summary` to a single sentence ≤120 chars derived from the **Mismatch** line — used for skim/search across `applied/` and `rejected/`.
+
 ## Win-driven `skill_edit` eligibility
 
 A `skill_edit` proposal sets `auto_apply_eligible: true` ONLY when ALL hold:
@@ -201,6 +249,7 @@ Sum:
 - Transcript contains positive endorsement (`yes`, `exactly`, `do that`, `keep doing`) within 2 messages of related action: **+2**
 - Multi-axis cluster (≥2 distinct struggle types in same session): **+1**
 - Type-bias penalty from feedback loop (≥3 rejections, applied:rejected ratio <1:2 for this `type`): **-1**
+- Diagnosis flags `Mismatch: unclear` (causation could not be reconstructed from transcript context): **-1**
 - Blast radius low (memory file or new isolated skill): **+1**
 - Blast radius medium (new agent, new hook, edit existing skill): **0**
 - Blast radius high (CLAUDE.md, settings.json hooks, edit agent, deletion): **-1**
@@ -268,10 +317,15 @@ source_entries:
 win_evidence: "<ts of triggering clean_recovery or correction_free_streak entry>"
 bytes_before: <int>
 bytes_after: <int>
+# optional — auto-populated from Diagnosis Mismatch line
+diagnosis_summary: "<≤120 chars, single sentence>"
 ---
 
 # Why
 <observed evidence: session ids, dates, quotes from transcript synthesis>
+
+# Diagnosis
+<four labelled lines per "Diagnosis drafting protocol": Trigger / Action / Mismatch / Outcome — Outcome must contain ≥1 backtick-wrapped transcript quote ≤80 chars>
 
 # Assumptions
 - <assumption 1>

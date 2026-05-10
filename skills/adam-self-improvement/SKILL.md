@@ -105,6 +105,7 @@ adam reflect summary:
 
 Before writing any proposal:
 - Confirm `# Assumptions` section is non-empty.
+- Confirm `# Diagnosis` section exists and contains all four labelled lines (`Trigger:`, `Action:`, `Mismatch:`, `Outcome:`) AND at least one backtick-wrapped quote ≤80 chars in the Outcome line. Refuse if missing or malformed — agent must redraft per the "Diagnosis drafting protocol" in `agents/adam.md`.
 - Confirm `# Success criterion` section is non-empty and runnable.
 - Confirm change is ≤50 LOC for non-`skill_new`, or ≤80 LOC for `skill_new` body. If larger, ask the user once: "this proposal is N LOC — proceed?"
 - For `claude_md_edit`: confirm 3+ distinct cwds in the `# Why` section.
