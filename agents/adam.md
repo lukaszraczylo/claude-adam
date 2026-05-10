@@ -43,6 +43,8 @@ The hook emits these `type` values into the journal:
 | `edit_churn` | same file edited 4× in window | file basename |
 | `build_loop` | 2 build/test/compile commands fail in session | session |
 | `subagent_dispatch_pattern` | same subagent dispatched ≥3× cumulatively | subagent_type |
+| `correction_free_streak` | 5 clean UserPromptSubmits in a row (no correction phrase) | `active_skills[0]` |
+| `clean_recovery` | 3 clean PostToolUse events after a `tool_error_loop`/`dead_end`/`retry_loop` | (`recovered_from`, `active_skills[0]`) |
 
 ## Process
 
@@ -65,6 +67,8 @@ The hook emits these `type` values into the journal:
    - `edit_churn`: cluster by file basename pattern (e.g. `*.test.ts`).
    - `build_loop`: cluster by `session`.
    - `subagent_dispatch_pattern`: cluster by `subagent_type`.
+   - `correction_free_streak`: cluster by `active_skills[0]`. Treat ≥3 streaks across ≥2 sessions naming the same skill as cross-session evidence.
+   - `clean_recovery`: cluster by (`recovered_from`, `active_skills[0]`). A win cluster qualifies for `skill_edit` only when the named skill exists in `skills_root`.
 5. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
 6. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
    a. If cluster topic matches a rejected idea via the rejected-ideas fuzzy set (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.
@@ -172,6 +176,23 @@ Constraints:
 - Slug (used in `target` path filename) must not collide with any existing memory file.
 - For `type=feedback` and `type=project`, body MUST contain `**Why:**` and `**How to apply:**` lines (CLAUDE.md memory schema).
 
+## Win-driven `skill_edit` eligibility
+
+A `skill_edit` proposal sets `auto_apply_eligible: true` ONLY when ALL hold:
+
+1. `confidence ≥ 4`.
+2. `cross_session_evidence == true`.
+3. `# Why` cites ≥1 win-signal entry (`clean_recovery` or `correction_free_streak`) whose `active_skills` includes the target skill slug. Record this entry's `ts` in frontmatter field `win_evidence`.
+4. Diff is append-only — verify no `-` lines on existing SKILL.md content.
+5. Diff `+` lines ≤ 30.
+6. Resulting SKILL.md size ≤ 2× current size. Record both byte counts in frontmatter fields `bytes_before`, `bytes_after`.
+7. No entry in `applied_dir/` for the same `target` with `last_auto_edit` newer than 7 days ago (cooldown).
+8. No entry in `rejected_dir/` for this `target` with `auto_apply_blacklist: true` newer than 30 days ago.
+
+If any of (3)–(8) fails: still emit the proposal, but `auto_apply_eligible: false` — main thread queues for review.
+
+Win clusters do NOT override struggle clusters: a single `clean_recovery` cannot turn a `correction` cluster into a `skill_edit`. Struggle paths and win paths are independent.
+
 ## Confidence rubric (deterministic — do NOT vibe)
 
 Sum:
@@ -189,16 +210,16 @@ Sum:
 `auto_apply_eligible: true` requires **all** of:
 - `confidence ≥ 4`
 - `blast_radius == "low"`
-- `type ∈ {memory, skill_new}`
+- `type ∈ {memory, skill_new, skill_edit}` — `skill_edit` additionally requires the win-driven gate (see "Win-driven `skill_edit` eligibility")
 - `cross_session_evidence == true` — the +2 signal-repetition bonus came from the cross-session bullet (≥3× across ≥2 sessions). **Single-session-only struggle proposals always queue, never auto-apply, regardless of total confidence.** Record as frontmatter field `cross_session_evidence: true|false` on every proposal.
 
 ## Proposal types
 
 | Type | Target | Default blast | Auto-apply? |
 |---|---|---|---|
-| `memory` | `~/.claude/projects/<encoded-home>/memory/*.md` | low | yes if conf≥4 AND cross_session |
+| `memory` | `~/.claude/projects/-Users-nvm/memory/*.md` | low | yes if conf≥4 AND cross_session |
 | `skill_new` | new dir under `~/.claude/skills/` | low | yes if conf≥4 AND cross_session |
-| `skill_edit` | existing skill file | medium | no |
+| `skill_edit` | existing skill file | medium | yes if win-evidence + LOC + cooldown gates all pass (see "Win-driven skill_edit eligibility") |
 | `agent_new` | new file under `~/.claude/agents/` | medium | no |
 | `agent_edit` | existing agent file | medium | no |
 | `claude_md_edit` | `~/.claude/CLAUDE.md` | high | no |
@@ -243,6 +264,10 @@ source_entries:
   - "<journal entry ts that fed this cluster>"
   - "<another ts>"
   - "..."
+# skill_edit only — required when auto_apply_eligible: true
+win_evidence: "<ts of triggering clean_recovery or correction_free_streak entry>"
+bytes_before: <int>
+bytes_after: <int>
 ---
 
 # Why

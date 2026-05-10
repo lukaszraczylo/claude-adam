@@ -279,6 +279,78 @@ else
 fi
 rm -rf /tmp/adam-test-18
 
+# --- Test 19: correction_free_streak fires after 5 clean prompts ---
+echo "Test 19: correction_free_streak after 5 clean prompts"
+reset_state
+for i in 1 2 3 4 5; do
+  echo "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"please do step $i\",\"session_id\":\"sCF\",\"cwd\":\"/tmp/x\"}" \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+assert_grep "$ROOT/journal.jsonl" '"type":"correction_free_streak"' "5 clean prompts logs correction_free_streak"
+
+# --- Test 20: correction phrase resets streak counter ---
+echo "Test 20: correction phrase breaks correction_free_streak"
+reset_state
+for i in 1 2 3 4; do
+  echo "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"please do step $i\",\"session_id\":\"sCB\",\"cwd\":\"/tmp/x\"}" \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"no, undo that","session_id":"sCB","cwd":"/tmp/x"}' \
+  | node "$HOOK" >/dev/null 2>&1 || true
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"go on","session_id":"sCB","cwd":"/tmp/x"}' \
+  | node "$HOOK" >/dev/null 2>&1 || true
+if grep -qE '"type":"correction_free_streak"' "$ROOT/journal.jsonl"; then
+  echo "  FAIL: correction_free_streak fired despite intervening correction"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: correction phrase reset the streak counter"; PASS=$((PASS+1))
+fi
+
+# --- Test 21: clean_recovery fires after struggle + 3 clean tools ---
+echo "Test 21: clean_recovery after struggle + 3 clean tools"
+reset_state
+for i in 1 2 3; do
+  echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"foo"},"tool_response":{"is_error":true,"content":"Error: command not found: foo"},"session_id":"sR","cwd":"/tmp/x"}' \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+for i in 1 2 3; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/ok-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sR\",\"cwd\":\"/tmp/x\"}" \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+assert_grep "$ROOT/journal.jsonl" '"type":"clean_recovery"' "3 clean tools after struggle logs clean_recovery"
+assert_grep "$ROOT/journal.jsonl" '"recovered_from":"tool_error_loop"' "recovered_from set on clean_recovery"
+
+# --- Test 22: clean_recovery resets when error breaks the streak ---
+echo "Test 22: clean_recovery suppressed by intervening error"
+reset_state
+for i in 1 2 3; do
+  echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"foo"},"tool_response":{"is_error":true,"content":"Error: command not found: foo"},"session_id":"sRE","cwd":"/tmp/x"}' \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+for i in 1 2; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/ok-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sRE\",\"cwd\":\"/tmp/x\"}" \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"x"},"tool_response":{"is_error":true,"content":"Error: again"},"session_id":"sRE","cwd":"/tmp/x"}' \
+  | node "$HOOK" >/dev/null 2>&1 || true
+echo '{"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"/tmp/ok-3"},"tool_response":{"content":"ok"},"session_id":"sRE","cwd":"/tmp/x"}' \
+  | node "$HOOK" >/dev/null 2>&1 || true
+if grep -qE '"type":"clean_recovery"' "$ROOT/journal.jsonl"; then
+  echo "  FAIL: clean_recovery fired despite intervening error"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: clean_recovery suppressed by intervening error"; PASS=$((PASS+1))
+fi
+
+# --- Test 23: active_skills payload populated on win signals ---
+echo "Test 23: correction_free_streak payload includes active skill"
+reset_state
+echo '{"hook_event_name":"PreToolUse","tool_name":"Skill","tool_input":{"skill":"caveman"},"session_id":"sAS","cwd":"/tmp/x"}' \
+  | node "$HOOK" >/dev/null 2>&1 || true
+for i in 1 2 3 4 5; do
+  echo "{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"step $i\",\"session_id\":\"sAS\",\"cwd\":\"/tmp/x\"}" \
+    | node "$HOOK" >/dev/null 2>&1 || true
+done
+assert_grep "$ROOT/journal.jsonl" '"active_skills":\["caveman"\]' "active_skills payload includes invoked skill"
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]

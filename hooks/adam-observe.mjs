@@ -28,6 +28,10 @@ const DEAD_END_THRESHOLD = 8;
 const EDIT_CHURN_THRESHOLD = 4;
 const BUILD_LOOP_THRESHOLD = 2;
 const SUBAGENT_DISPATCH_THRESHOLD = 3;
+const CORRECTION_FREE_THRESHOLD = 5;
+const CLEAN_RECOVERY_WINDOW = 3;
+const STRUGGLE_TYPES = new Set(["tool_error_loop", "dead_end", "retry_loop"]);
+const ACTIVE_SKILLS_LOOKBACK = 10;
 const STATE_MAX_BYTES = 1_000_000;
 
 function safeRead(path, fallback) {
@@ -77,6 +81,17 @@ function readUsage(name) {
   return usage[name] || 0;
 }
 
+function pushActivity(state, kind, name, ts) {
+  state.activity_ring.push({ kind, name, ts });
+  if (state.activity_ring.length > ACTIVE_SKILLS_LOOKBACK) state.activity_ring.shift();
+}
+
+function activeNames(state, kind) {
+  const seen = new Set();
+  for (const e of state.activity_ring) if (e.kind === kind) seen.add(e.name);
+  return [...seen];
+}
+
 function errorFingerprint(toolResponse) {
   if (!toolResponse) return null;
   let text = "";
@@ -114,6 +129,8 @@ function resetSessionLocal(state) {
   resetFrictionCounters(state);
   state.session_subagents = {};
   state.subagent_dispatch_emitted = {};
+  state.correctionFreeCounter = 0;
+  state.recoveryWatch = null;
 }
 
 function ensureStateDefaults(state) {
@@ -127,6 +144,9 @@ function ensureStateDefaults(state) {
   if (typeof state.build_loop_emitted !== "boolean") state.build_loop_emitted = false;
   if (!state.session_subagents || typeof state.session_subagents !== "object") state.session_subagents = {};
   if (!state.subagent_dispatch_emitted || typeof state.subagent_dispatch_emitted !== "object") state.subagent_dispatch_emitted = {};
+  if (typeof state.correctionFreeCounter !== "number") state.correctionFreeCounter = 0;
+  if (state.recoveryWatch === undefined) state.recoveryWatch = null;
+  if (!Array.isArray(state.activity_ring)) state.activity_ring = [];
 }
 
 function main() {
@@ -155,6 +175,18 @@ function main() {
         prev_tool: last.tool || null,
         prev_file: last.file || null,
       });
+      state.correctionFreeCounter = 0;
+    } else {
+      state.correctionFreeCounter += 1;
+      if (state.correctionFreeCounter >= CORRECTION_FREE_THRESHOLD) {
+        appendJournal({
+          ts, session, cwd, type: "correction_free_streak",
+          streak: state.correctionFreeCounter,
+          active_skills: activeNames(state, "skill"),
+          active_agents: activeNames(state, "agent"),
+        });
+        state.correctionFreeCounter = 0;
+      }
     }
     resetFrictionCounters(state);
   } else if (event === "PreToolUse") {
@@ -162,9 +194,11 @@ function main() {
     if (tool === "Skill") {
       const name = (input.tool_input && (input.tool_input.skill || input.tool_input.skill_name)) || "unknown";
       bumpUsage(`skill:${name}`);
+      pushActivity(state, "skill", name, ts);
     } else if (tool === "Agent") {
       const name = (input.tool_input && (input.tool_input.subagent_type || input.tool_input.agent)) || "unknown";
       bumpUsage(`agent:${name}`);
+      pushActivity(state, "agent", name, ts);
       state.session_subagents[name] = (state.session_subagents[name] || 0) + 1;
       const cumulative = readUsage(`agent:${name}`);
       const sessionCount = state.session_subagents[name];
@@ -182,6 +216,12 @@ function main() {
     const argsHash = djb2(JSON.stringify(input.tool_input || {}));
     const file = (input.tool_input && (input.tool_input.file_path || input.tool_input.path)) || null;
 
+    let struggleEmittedThisTurn = null;
+    const emit = (entry) => {
+      if (STRUGGLE_TYPES.has(entry.type)) struggleEmittedThisTurn = entry.type;
+      appendJournal(entry);
+    };
+
     const windowEntry = { tool, argsHash, file };
     if (tool === "Agent") {
       const sub = (input.tool_input && (input.tool_input.subagent_type || input.tool_input.agent)) || "unknown";
@@ -192,14 +232,14 @@ function main() {
 
     const sameToolArgs = state.tool_window.filter(e => e.tool === tool && e.argsHash === argsHash).length;
     if (sameToolArgs >= RETRY_THRESHOLD) {
-      appendJournal({ ts, session, cwd, type: "retry_loop", tool, count: sameToolArgs });
+      emit({ ts, session, cwd, type: "retry_loop", tool, count: sameToolArgs });
     }
 
     if (tool === "Agent") {
       const subagent = (input.tool_input && (input.tool_input.subagent_type || input.tool_input.agent)) || "unknown";
       const recent = state.tool_window.slice(-5).filter(e => e.tool === "Agent" && e.subagent === subagent).length;
       if (recent >= AGENT_RESPAWN_THRESHOLD) {
-        appendJournal({ ts, session, cwd, type: "weak_agent", subagent_type: subagent, count: recent });
+        emit({ ts, session, cwd, type: "weak_agent", subagent_type: subagent, count: recent });
       }
     }
 
@@ -214,14 +254,14 @@ function main() {
       if (state.last_errors.length > ERROR_RING_SIZE) state.last_errors.shift();
       const sameError = state.last_errors.filter(e => e.fp === fp).length;
       if (sameError >= ERROR_LOOP_THRESHOLD) {
-        appendJournal({ ts, session, cwd, type: "tool_error_loop", tool, count: sameError, fp });
+        emit({ ts, session, cwd, type: "tool_error_loop", tool, count: sameError, fp });
       }
     }
 
     if (file && EDIT_TOOLS.has(tool)) {
       state.edit_counts[file] = (state.edit_counts[file] || 0) + 1;
       if (state.edit_counts[file] >= EDIT_CHURN_THRESHOLD && !state.edit_churn_emitted[file]) {
-        appendJournal({ ts, session, cwd, type: "edit_churn", file, count: state.edit_counts[file] });
+        emit({ ts, session, cwd, type: "edit_churn", file, count: state.edit_counts[file] });
         state.edit_churn_emitted[file] = true;
       }
       const keys = Object.keys(state.edit_counts);
@@ -239,7 +279,7 @@ function main() {
       if (isBuildCmd && hasError) {
         state.build_failure_count += 1;
         if (state.build_failure_count >= BUILD_LOOP_THRESHOLD && !state.build_loop_emitted) {
-          appendJournal({ ts, session, cwd, type: "build_loop", count: state.build_failure_count, command: cmd.slice(0, 80) });
+          emit({ ts, session, cwd, type: "build_loop", count: state.build_failure_count, command: cmd.slice(0, 80) });
           state.build_loop_emitted = true;
         }
       }
@@ -247,8 +287,31 @@ function main() {
 
     state.tools_since_user += 1;
     if (state.tools_since_user >= DEAD_END_THRESHOLD && !state.dead_end_emitted) {
-      appendJournal({ ts, session, cwd, type: "dead_end", count: state.tools_since_user });
+      emit({ ts, session, cwd, type: "dead_end", count: state.tools_since_user });
       state.dead_end_emitted = true;
+    }
+
+    if (struggleEmittedThisTurn) {
+      state.recoveryWatch = { recovered_from: struggleEmittedThisTurn, since_ts: ts, clean_count: 0, window_tools: [] };
+    } else if (state.recoveryWatch) {
+      const turnHadError = fp !== null;
+      if (turnHadError) {
+        state.recoveryWatch = null;
+      } else {
+        state.recoveryWatch.clean_count += 1;
+        state.recoveryWatch.window_tools.push(tool);
+        if (state.recoveryWatch.window_tools.length > CLEAN_RECOVERY_WINDOW) state.recoveryWatch.window_tools.shift();
+        if (state.recoveryWatch.clean_count >= CLEAN_RECOVERY_WINDOW) {
+          appendJournal({
+            ts, session, cwd, type: "clean_recovery",
+            recovered_from: state.recoveryWatch.recovered_from,
+            recovery_window_tools: state.recoveryWatch.window_tools.slice(),
+            active_skills: activeNames(state, "skill"),
+            active_agents: activeNames(state, "agent"),
+          });
+          state.recoveryWatch = null;
+        }
+      }
     }
   }
 

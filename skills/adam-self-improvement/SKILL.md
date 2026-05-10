@@ -44,8 +44,22 @@ For each id in `high_confidence`:
 - Verify in front of the user: print `id`, `target`, `confidence`, `blast_radius`, `cross_session_evidence`, `auto_apply_eligible`.
 - Apply the change:
   - **For `skill_new`**: `mkdir -p ~/.claude/skills/<slug>/`, then `Write` the proposal's `# Proposed change` body to `~/.claude/skills/<slug>/SKILL.md`. After write, print: "skill `<slug>` written to `~/.claude/skills/<slug>/SKILL.md` — activates immediately — Claude Code v2.1.0+ auto-hot-reloads user-level skills, no restart needed."
-  - **For `memory`**: `Write` the proposal's `# Proposed change` body (which MUST include the auto-memory frontmatter — see "Memory drafting protocol" in `agents/adam.md`) to the path in `target` (under `~/.claude/projects/<encoded-home>/memory/`, where `<encoded-home>` is the user's home dir with `/` replaced by `-`, e.g. `-Users-alice` on macOS). Then update `MEMORY.md` index with a one-line pointer.
-  - **For other types under auto-apply**: apply via Write/Edit per `# Proposed change`. (Note: only `memory` and `skill_new` qualify for auto-apply per the rubric.)
+  - **For `memory`**: `Write` the proposal's `# Proposed change` body (which MUST include the auto-memory frontmatter — see "Memory drafting protocol" in `agents/adam.md`) to the path in `target`. Then update `MEMORY.md` index with a one-line pointer.
+  - **For `skill_edit`**: enforce the apply-time gate before writing.
+    1. Verify proposal frontmatter has `auto_apply_eligible: true`. If not, abort and queue for review.
+    2. Read `target` SKILL.md, capture `current_bytes` from a fresh stat — do NOT trust frontmatter `bytes_before`.
+    3. Verify diff in `# Proposed change`:
+       - Unified-diff format.
+       - Zero `-` lines on existing SKILL.md content (additions only).
+       - Total `+` lines ≤ 30.
+       If any check fails, print one-line refusal reason, leave proposal in `proposals/`, continue.
+    4. Cooldown re-check: scan `applied/` frontmatter for `target` matching this and `last_auto_edit` newer than 7 days ago. Refuse if found.
+    5. Blacklist re-check: scan `rejected/` frontmatter for `target` matching this and `auto_apply_blacklist: true` newer than 30 days ago. Refuse if found.
+    6. Apply via `Edit` tool (append the new section per the diff). Never use `Write` on existing SKILL.md.
+    7. Re-stat target. If new size exceeds `2 * current_bytes` (captured in step 2), revert via `Edit` (remove the just-appended section) and refuse — print refusal reason.
+    8. Add `last_auto_edit: <iso8601 utc now>` to the proposal frontmatter before moving it.
+    9. Tell user: "skill `<slug>` extended (added <N> lines) — auto-applied via win-evidence gate."
+  - **For other types under auto-apply**: apply via Write/Edit per `# Proposed change`. (Note: only `memory`, `skill_new`, and `skill_edit` qualify for auto-apply per the rubric.)
 - Move proposal to `~/.claude/adam/applied/<UTC-ts>-<id>.md`.
 - **Archive consumed journal entries**: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/applied/<UTC-ts>-<id>.md` — moves entries listed in proposal's `source_entries` from `journal.jsonl` to `journal/actioned-<id>.jsonl` so subsequent `/reflect` runs do not re-cluster them.
 
@@ -66,7 +80,7 @@ c. On **approve**:
    - For all others: apply via Write/Edit per the proposal's `# Proposed change`.
    - Move proposal to `~/.claude/adam/applied/<ts>-<id>.md`.
    - Archive: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/applied/<ts>-<id>.md`.
-d. On **reject**: ask for reason in one line. Append `# Reason\n<reason>` to proposal body. Move to `~/.claude/adam/rejected/<id>.md`. Archive: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/rejected/<id>.md`.
+d. On **reject**: ask for reason in one line. Append `# Reason\n<reason>` to proposal body. If the proposal `type` is `skill_edit`, ALSO add `auto_apply_blacklist: true` to its frontmatter (so future reflects skip auto-apply on this target for 30 days). Move to `~/.claude/adam/rejected/<id>.md`. Archive: `node ~/.claude/adam/scripts/adam-archive.mjs ~/.claude/adam/rejected/<id>.md`.
 e. On **edit**: ask the user for the change, edit the proposal in place, then loop back to step 3a for that same id.
 
 ### 4. Handle failures
@@ -96,7 +110,7 @@ Before writing any proposal:
 - For `claude_md_edit`: confirm 3+ distinct cwds in the `# Why` section.
 - For `deletion`: confirm both criteria (a) and (b) from the agent's special handling are documented in the proposal.
 - For `skill_new`: confirm the slug doesn't collide with any existing skill in `~/.claude/skills/`. If it does, refuse and ask user to rename.
-- For `skill_edit`: confirm the diff is append-only (no `-` lines that remove existing content) and that target SKILL.md exists.
+- For `skill_edit`: confirm the diff is append-only (no `-` lines that remove existing content) and that target SKILL.md exists. When auto-applying, ALSO re-verify the eligibility gate steps in §2 (cooldown, blacklist, byte cap) before any `Edit` call — never trust frontmatter alone.
 - For `memory`: confirm `# Proposed change` body starts with `---` frontmatter containing required fields `name`, `description`, `type`, `originSessionId`. Refuse if frontmatter missing — agent must redraft per the Memory drafting protocol.
 - Confirm `source_entries` is present in proposal frontmatter as a non-empty list (used for archive). Warn (do not refuse) if missing — legacy proposals from before v0.2.0 won't have it.
 
