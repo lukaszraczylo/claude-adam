@@ -364,6 +364,48 @@ for i in 1 2 3 4 5; do
 done
 assert_grep "$ROOT/journal.jsonl" '"active_skills":\["caveman"\]' "active_skills payload includes invoked skill"
 
+# --- Test 24: task_completed fires on diverse multi-tool task ---
+echo "Test 24: task_completed after 5 tools / 3 kinds / no corrections"
+reset_state
+for kind in Bash Read Edit Write Grep; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"$kind\",\"tool_input\":{},\"session_id\":\"sT\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"go on","session_id":"sT","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+assert_grep "$ROOT/journal.jsonl" '"type":"task_completed"' "5 tools + 5 kinds + 0 corrections emits task_completed"
+
+# --- Test 25: task_completed suppressed when tool diversity < 3 ---
+echo "Test 25: task_completed suppressed on single-tool run"
+reset_state
+for i in 1 2 3 4 5; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"/tmp/$i\"},\"session_id\":\"sT2\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"go on","session_id":"sT2","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+if grep -qE '"type":"task_completed"' "$ROOT/journal.jsonl"; then
+  echo "  FAIL: task_completed fired on single-tool task"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: task_completed suppressed (low tool diversity)"; PASS=$((PASS+1))
+fi
+
+# --- Test 26: task_completed suppressed when correction fires mid-task ---
+echo "Test 26: task_completed suppressed after correction"
+reset_state
+for kind in Bash Read Edit Write Grep; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"$kind\",\"tool_input\":{},\"session_id\":\"sT3\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+# Correction phrase resets task_corrections inside the same UserPromptSubmit cycle, so the prior run is disqualified.
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"no, undo that","session_id":"sT3","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+if grep -qE '"type":"task_completed"' "$ROOT/journal.jsonl"; then
+  echo "  FAIL: task_completed fired despite correction on the closing prompt"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: task_completed suppressed by correction"; PASS=$((PASS+1))
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]

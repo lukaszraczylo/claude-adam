@@ -38,6 +38,7 @@ The hook emits these `type` values into the journal:
 | `subagent_dispatch_pattern` | same subagent dispatched ≥3× cumulatively | subagent_type |
 | `correction_free_streak` | 5 clean UserPromptSubmits in a row (no correction phrase) | `active_skills[0]` |
 | `clean_recovery` | 3 clean PostToolUse events after a `tool_error_loop`/`dead_end`/`retry_loop` | (`recovered_from`, `active_skills[0]`) |
+| `task_completed` | UserPromptSubmit closes a run of ≥5 tool calls with ≥3 distinct tool kinds and 0 corrections | sorted `tool_kinds` tuple |
 
 ## Process
 
@@ -62,6 +63,7 @@ The hook emits these `type` values into the journal:
    - `subagent_dispatch_pattern`: cluster by `subagent_type`.
    - `correction_free_streak`: cluster by `active_skills[0]`. Treat ≥3 streaks across ≥2 sessions naming the same skill as cross-session evidence.
    - `clean_recovery`: cluster by (`recovered_from`, `active_skills[0]`). A win cluster qualifies for `skill_edit` only when the named skill exists in `skills_root`.
+   - `task_completed`: cluster by sorted `tool_kinds` tuple (the multi-tool recipe). Single entry qualifies for `skill_new` proposal (drafting protocol applies). Cross-session evidence requires ≥2 entries from distinct sessions with same tuple — without it, proposal queues, never auto-applies. Run the existing skill-overlap rule before drafting: if the recipe matches an existing skill's name/description tokens, route to `skill_edit` instead.
 5. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
 6. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
    a. If cluster topic matches a rejected idea via the rejected-ideas fuzzy set (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.

@@ -32,6 +32,8 @@ const CORRECTION_FREE_THRESHOLD = 5;
 const CLEAN_RECOVERY_WINDOW = 3;
 const STRUGGLE_TYPES = new Set(["tool_error_loop", "dead_end", "retry_loop"]);
 const ACTIVE_SKILLS_LOOKBACK = 10;
+const TASK_TOOL_MIN = 5;
+const TASK_DIVERSITY_MIN = 3;
 const STATE_MAX_BYTES = 1_000_000;
 
 function safeRead(path, fallback) {
@@ -133,6 +135,9 @@ function resetSessionLocal(state) {
   state.correctionFreeCounter = 0;
   state.recoveryWatch = null;
   state.tool_window = [];
+  state.task_tool_kinds = {};
+  state.task_tool_count = 0;
+  state.task_corrections = 0;
 }
 
 function ensureStateDefaults(state) {
@@ -149,6 +154,9 @@ function ensureStateDefaults(state) {
   if (typeof state.correctionFreeCounter !== "number") state.correctionFreeCounter = 0;
   if (state.recoveryWatch === undefined) state.recoveryWatch = null;
   if (!Array.isArray(state.activity_ring)) state.activity_ring = [];
+  if (!state.task_tool_kinds || typeof state.task_tool_kinds !== "object") state.task_tool_kinds = {};
+  if (typeof state.task_tool_count !== "number") state.task_tool_count = 0;
+  if (typeof state.task_corrections !== "number") state.task_corrections = 0;
 }
 
 function main() {
@@ -178,6 +186,7 @@ function main() {
         prev_file: last.file || null,
       });
       state.correctionFreeCounter = 0;
+      state.task_corrections += 1;
     } else {
       state.correctionFreeCounter += 1;
       if (state.correctionFreeCounter >= CORRECTION_FREE_THRESHOLD) {
@@ -190,6 +199,22 @@ function main() {
         state.correctionFreeCounter = 0;
       }
     }
+    // Evaluate prior task (work between previous UserPromptSubmit and this one).
+    const taskKinds = Object.keys(state.task_tool_kinds);
+    if (state.task_tool_count >= TASK_TOOL_MIN &&
+        taskKinds.length >= TASK_DIVERSITY_MIN &&
+        state.task_corrections === 0) {
+      appendJournal({
+        ts, session, cwd, type: "task_completed",
+        tool_count: state.task_tool_count,
+        tool_kinds: taskKinds,
+        active_skills: activeNames(state, "skill"),
+        active_agents: activeNames(state, "agent"),
+      });
+    }
+    state.task_tool_kinds = {};
+    state.task_tool_count = 0;
+    state.task_corrections = 0;
     resetFrictionCounters(state);
   } else if (event === "PreToolUse") {
     const tool = input.tool_name;
@@ -292,6 +317,9 @@ function main() {
       emit({ ts, session, cwd, type: "dead_end", count: state.tools_since_user });
       state.dead_end_emitted = true;
     }
+
+    state.task_tool_count += 1;
+    state.task_tool_kinds[tool] = (state.task_tool_kinds[tool] || 0) + 1;
 
     if (struggleEmittedThisTurn) {
       state.recoveryWatch = { recovered_from: struggleEmittedThisTurn, since_ts: ts, clean_count: 0, window_tools: [] };
