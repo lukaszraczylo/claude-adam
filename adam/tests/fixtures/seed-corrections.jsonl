@@ -1,0 +1,3 @@
+{"ts":"2026-05-10T10:00:00Z","session":"s-aaa","cwd":"/tmp/p1","type":"correction","phrase":"no use go test -count=1","prev_tool":"Bash","prev_file":null}
+{"ts":"2026-05-10T11:00:00Z","session":"s-bbb","cwd":"/tmp/p2","type":"correction","phrase":"actually go test -count=1 always","prev_tool":"Bash","prev_file":null}
+{"ts":"2026-05-10T12:00:00Z","session":"s-ccc","cwd":"/tmp/p3","type":"correction","phrase":"don't use cached test results, -count=1","prev_tool":"Bash","prev_file":null}
