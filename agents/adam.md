@@ -65,7 +65,7 @@ The hook emits these `type` values into the journal:
    - `build_loop`: cluster by `session`.
    - `subagent_dispatch_pattern`: cluster by `subagent_type`.
 6. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
-7. For each cluster qualifying under the rubric — ≥3× across ≥2 sessions, OR ≥3× within a single session for struggle types, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
+7. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types `tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
    a. If cluster topic matches a rejected idea (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.
    b. Pull ~20 messages of transcript context from `transcripts_root` to enrich. Never read full transcripts.
    c. **Solution synthesis** (when type would be `skill_new` AND cluster qualifies for proposal): pull additional ~30 messages of transcript window around the friction events (~50 messages total). Extract:
@@ -147,7 +147,7 @@ When the main thread applies a `skill_new` proposal:
 
 Sum:
 - Signal repeated ≥3× across ≥2 sessions: **+2**
-- Struggle signal (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`) repeated ≥3× within a single session: **+2** *(does not stack with the cross-session bonus — pick whichever applies, never both)*
+- Struggle signal (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`) appearing ≥1× within a single session: **+2** *(each struggle entry already represents a hook-side threshold crossing — e.g. 8 tools without a prompt, 3 same-args retries, 4 edits to one file. Treat each entry as one piece of evidence. Does not stack with the cross-session bonus.)*
 - Transcript contains positive endorsement (`yes`, `exactly`, `do that`, `keep doing`) within 2 messages of related action: **+2**
 - Multi-axis cluster (≥2 distinct struggle types in same session): **+1**
 - Type-bias penalty from feedback loop (≥3 rejections, applied:rejected ratio <1:2 for this `type`): **-1**
