@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="claude-adam logo">
+  <title>claude-adam</title>
+  <desc>A stylized letter A with a captured observation point inside its apex — the friction signal that ADAM watches for.</desc>
+  <defs>
+    <linearGradient id="adam-stroke" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="currentColor" stop-opacity="1"/>
+      <stop offset="100%" stop-color="currentColor" stop-opacity="0.78"/>
+    </linearGradient>
+  </defs>
+  <g fill="none" stroke="url(#adam-stroke)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Left leg + apex + right leg as one continuous stroke -->
+    <path d="M 28 134 L 80 22 L 132 134"/>
+    <!-- Crossbar — the feedback line -->
+    <path d="M 48 96 L 112 96"/>
+  </g>
+  <!-- Captured observation: the signal inside the upper triangle -->
+  <circle cx="80" cy="72" r="7" fill="currentColor"/>
+</svg>
