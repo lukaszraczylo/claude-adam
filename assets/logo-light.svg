@@ -1,18 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="claude-adam logo">
   <title>claude-adam</title>
-  <desc>A swaddled baby — rounded A-shape bundle with a face inside and small hands extending from the wrap-band. Adapts to light/dark via embedded media query + currentColor fallback.</desc>
-  <style>
-    svg { color: #24292f; }
-    @media (prefers-color-scheme: dark) {
-      svg { color: #f0f6fc; }
-    }
-  </style>
-  <g stroke="currentColor">
+  <desc>A swaddled baby — rounded A-shape bundle with a face inside and small hands extending from the wrap-band. Light-background variant.</desc>
+  <g stroke="#24292f">
     <path d="M 36 134 Q 30 78 80 28 Q 130 78 124 134 Z" fill="none" stroke-width="9" stroke-linejoin="round"/>
     <path d="M 16 100 L 44 100 Q 80 115 116 100 L 144 100" fill="none" stroke-width="6" stroke-linecap="round"/>
     <path d="M 75 78 Q 80 82 85 78" fill="none" stroke-width="2.5" stroke-linecap="round"/>
   </g>
-  <g fill="currentColor">
+  <g fill="#24292f">
     <circle cx="72" cy="64" r="3.2"/>
     <circle cx="88" cy="64" r="3.2"/>
   </g>
