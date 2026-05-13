@@ -123,6 +123,15 @@ copy_file "$SRC/skills/adam-self-improvement/SKILL.md"               "$DEST/skil
 copy_file "$SRC/commands/reflect.md"                                 "$DEST/commands/reflect.md"
 # Adam internals
 copy_file "$SRC/adam/scripts/adam-archive.mjs"                       "$DEST/adam/scripts/adam-archive.mjs"
+copy_file "$SRC/adam/scripts/adam-upgrade.mjs"                       "$DEST/adam/scripts/adam-upgrade.mjs"
+# v0.3.3 helper scripts — invoked from SKILL.md / hooks / analyst flow
+for _adam_script in adam-utils adam-window adam-explain adam-nudge-eligibility adam-cooldown \
+                    adam-score adam-ab-measure adam-apply-reinforcement; do
+  copy_file "$SRC/adam/scripts/${_adam_script}.mjs" \
+            "$DEST/adam/scripts/${_adam_script}.mjs"
+  run "chmod +x \"$DEST/adam/scripts/${_adam_script}.mjs\""
+done
+run "chmod +x \"$DEST/adam/scripts/adam-upgrade.mjs\""
 copy_file "$SRC/adam/tests/run-tests.sh"                             "$DEST/adam/tests/run-tests.sh"
 copy_file "$SRC/adam/tests/fixtures/seed-corrections.jsonl"          "$DEST/adam/tests/fixtures/seed-corrections.jsonl"
 
@@ -201,6 +210,7 @@ log "  agents/adam.md"
 log "  skills/adam-self-improvement/SKILL.md"
 log "  commands/reflect.md"
 log "  adam/scripts/adam-archive.mjs"
+log "  adam/scripts/adam-upgrade.mjs"
 log "  adam/tests/run-tests.sh"
 log ""
 log "preserved (if existed):"
@@ -214,3 +224,13 @@ log ""
 log "ADAM is dormant until you run /reflect."
 log "journal:   $DEST/adam/journal.jsonl"
 log "proposals: $DEST/adam/proposals/"
+
+# --------------------------------------------------------------------- pending merges
+# If this upgrade left any `.adam-new` files behind, make the trap unmissable.
+PENDING_COUNT=$(find "$DEST" \( -name .git -o -name node_modules -o -path "*/adam/journal" -o -path "*/adam/trash" -o -path "*/adam/proposals" -o -path "*/adam/applied" -o -path "*/adam/rejected" \) -prune -o -type f -name '*.adam-new' -print 2>/dev/null | wc -l | tr -d ' ')
+if [ "${PENDING_COUNT:-0}" -gt 0 ]; then
+  log ""
+  warn "${PENDING_COUNT} file(s) need merge review."
+  warn "  Review:  node ~/.claude/adam/scripts/adam-upgrade.mjs --list"
+  warn "  Accept:  node ~/.claude/adam/scripts/adam-upgrade.mjs --accept <path>"
+fi

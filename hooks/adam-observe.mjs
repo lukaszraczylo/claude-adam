@@ -14,8 +14,76 @@ const JOURNAL = join(ROOT, "journal.jsonl");
 const STATE = join(ROOT, "state.json");
 const USAGE = join(ROOT, "usage.json");
 const JOURNAL_DIR = join(ROOT, "journal");
+// Safety fuse only — primary rotation is weekly (ISO Monday 00:00 UTC).
+// If active journal exceeds this even mid-week, force-rotate to avoid runaway growth.
+// Override via $ADAM_MAX_JOURNAL_BYTES (used by tests).
+const MAX_JOURNAL_BYTES = Number(process.env.ADAM_MAX_JOURNAL_BYTES) || 50 * 1024 * 1024;
 
-const CORRECTION_RE = /\b(no|stop|don't|don\'t|wrong|actually|nope|undo|revert)\b/i;
+// Strong-correction tokens: any single occurrence in a prompt is a correction.
+// Weak tokens (no/actually/wait) require co-occurrence with a negation/contrast
+// token within an 8-token window — see isCorrection() below.
+const CORRECTION_RE = /\b(stop|don't|don\'t|wrong|nope|undo|revert|incorrect|nevermind|never\s+mind|disregard|redo)\b|that's\s+wrong|hold\s+on|wait\s+wait|try\s+again|different\s+approach|that's\s+not\s+what\s+i\s+meant|not\s+what\s+i\s+wanted|start\s+over|go\s+back/i;
+const WEAK_CORRECTION_TOKENS = new Set(["no", "actually", "wait"]);
+const NEGATION_RE = /^(not|wrong|but|isn't|isn\'t|didn't|didn\'t|aren't|aren\'t|won't|won\'t|shouldn't|shouldn\'t|don't|don\'t|nope|bad|broken|fail|fails|failed|failing)$/i;
+const WEAK_WINDOW = 8;
+
+function isCorrection(text) {
+  if (!text || typeof text !== "string") return false;
+  if (CORRECTION_RE.test(text)) return true;
+  // Weak-token path: token must co-occur with a negation/contrast within WEAK_WINDOW tokens.
+  const tokens = text.toLowerCase().split(/\s+/).map(t => t.replace(/^[^\w']+|[^\w']+$/g, "")).filter(Boolean);
+  for (let i = 0; i < tokens.length; i++) {
+    if (!WEAK_CORRECTION_TOKENS.has(tokens[i])) continue;
+    const lo = Math.max(0, i - WEAK_WINDOW);
+    const hi = Math.min(tokens.length - 1, i + WEAK_WINDOW);
+    for (let j = lo; j <= hi; j++) {
+      if (j === i) continue;
+      if (NEGATION_RE.test(tokens[j])) return true;
+    }
+  }
+  return false;
+}
+
+// Canonical error codes. Surface text → code mapping below.
+const ERROR_CODES = new Set([
+  "ENOENT", "ECONNREFUSED", "ETIMEDOUT", "EACCES", "EPERM", "EADDRINUSE",
+  "ENOTFOUND", "EISDIR", "ENOTDIR", "EEXIST", "EMFILE", "EPIPE", "ECONNRESET"
+]);
+const ERROR_CODE_RE = /\b(ENOENT|ECONNREFUSED|ETIMEDOUT|EACCES|EPERM|EADDRINUSE|ENOTFOUND|EISDIR|ENOTDIR|EEXIST|EMFILE|EPIPE|ECONNRESET)\b/;
+// Phrase → code mapping. First match wins; order matters.
+const ERROR_PHRASE_MAP = [
+  [/no such file or directory/i,    "ENOENT"],
+  [/connection refused/i,           "ECONNREFUSED"],
+  [/permission denied/i,            "EACCES"],
+  [/address already in use/i,       "EADDRINUSE"],
+  [/connection reset/i,             "ECONNRESET"],
+  [/operation timed out/i,          "ETIMEDOUT"],
+  [/name resolution|getaddrinfo/i,  "ENOTFOUND"],
+];
+
+function normalizeErrorText(text) {
+  if (!text || typeof text !== "string") return "";
+  let s = text;
+  // ISO timestamps first (contain digits we'd otherwise strip individually).
+  s = s.replace(/\d{4}-\d{2}-\d{2}T[\d:.Z+-]+/g, " ");
+  // Windows paths.
+  s = s.replace(/[A-Z]:\\[^\s]+/g, " ");
+  // Absolute POSIX paths.
+  s = s.replace(/\/[^\s:]+/g, " ");
+  // Hex addresses.
+  s = s.replace(/0x[0-9a-f]+/gi, " ");
+  // Unix epoch (seconds or ms): 10-13 digit runs.
+  s = s.replace(/\b\d{10,13}\b/g, " ");
+  // Line/col refs.
+  s = s.replace(/:\d+(?::\d+)?/g, " ");
+  // UUIDs.
+  s = s.replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, " ");
+  // Large integers (>6 digits) that survived above.
+  s = s.replace(/\b\d{7,}\b/g, " ");
+  // Lowercase + collapse whitespace.
+  s = s.toLowerCase().replace(/\s+/g, " ").trim();
+  return s.slice(0, 80);
+}
 const ERROR_RE = /\b(error|failed|exception|traceback|denied|cannot|unable to|not found|undefined|nullpointer|typeerror|syntaxerror|panic|fatal|enoent|econnrefused|etimedout|eaccess|segfault|crashed|uncaught)\b/i;
 const BUILD_RE = /\b(build|compile|make|gradle|cargo|tsc|webpack|vite|rollup|pytest|jest|mocha|vitest|go\s+test|npm\s+test|yarn\s+test|npm\s+run\s+build|yarn\s+build|ctest|ninja|bazel)\b/i;
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
@@ -44,14 +112,69 @@ function safeWrite(path, obj) {
   try { writeFileSync(path, JSON.stringify(obj)); } catch {}
 }
 
-function rotateIfLarge(path, max) {
+// ISO-8601 week: returns { year, week } for a Date (UTC).
+// Week 1 = the week containing the first Thursday of the year (Monday-based weeks).
+function isoWeek(date) {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  // Shift to Thursday in current week (ISO week-numbering year tracks the Thursday).
+  const day = d.getUTCDay() || 7; // 1..7, Mon=1..Sun=7
+  d.setUTCDate(d.getUTCDate() + 4 - day);
+  const isoYear = d.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return { year: isoYear, week };
+}
+
+function isoWeekTag(date) {
+  const { year, week } = isoWeek(date);
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+function firstEntryTs(path) {
   try {
-    if (existsSync(path) && statSync(path).size > max) {
-      mkdirSync(JOURNAL_DIR, { recursive: true });
-      const today = new Date().toISOString().slice(0, 10);
-      const dest = join(JOURNAL_DIR, `${today}-${Date.now()}.jsonl`);
-      renameSync(path, dest);
+    const buf = readFileSync(path, "utf8");
+    const nl = buf.indexOf("\n");
+    const firstLine = nl === -1 ? buf : buf.slice(0, nl);
+    if (!firstLine.trim()) return null;
+    const obj = JSON.parse(firstLine);
+    return obj && typeof obj.ts === "string" ? obj.ts : null;
+  } catch { return null; }
+}
+
+// Weekly ISO rotation + size safety fuse.
+// - If active journal's first entry is in a different ISO week than now, rotate to
+//   journal/<that-entry's-iso-week>.jsonl and start fresh.
+// - If active journal exceeds MAX_JOURNAL_BYTES, force-rotate even mid-week
+//   using the current ISO week tag (suffixed with timestamp to avoid clobber).
+function rotateIfNeeded(path) {
+  try {
+    if (!existsSync(path)) return;
+    const size = statSync(path).size;
+    if (size === 0) return;
+    const now = new Date();
+    const currentTag = isoWeekTag(now);
+    const firstTs = firstEntryTs(path);
+    let rotate = false;
+    let destTag = null;
+    if (firstTs) {
+      const firstTag = isoWeekTag(new Date(firstTs));
+      if (firstTag !== currentTag) {
+        rotate = true;
+        destTag = firstTag;
+      }
     }
+    if (!rotate && size > MAX_JOURNAL_BYTES) {
+      rotate = true;
+      destTag = `${currentTag}-${Date.now()}`; // safety-fuse: keep mid-week rotations unique
+    }
+    if (!rotate) return;
+    mkdirSync(JOURNAL_DIR, { recursive: true });
+    let dest = join(JOURNAL_DIR, `${destTag}.jsonl`);
+    if (existsSync(dest)) {
+      // Append-merge collision (rare: two mid-week safety-fuse rotations in same ms).
+      dest = join(JOURNAL_DIR, `${destTag}-${Date.now()}.jsonl`);
+    }
+    renameSync(path, dest);
   } catch {}
 }
 
@@ -65,7 +188,7 @@ function readStdin() {
 }
 
 function appendJournal(entry) {
-  rotateIfLarge(JOURNAL, STATE_MAX_BYTES * 5);
+  rotateIfNeeded(JOURNAL);
   try {
     appendFileSync(JOURNAL, JSON.stringify(entry) + "\n");
   } catch {}
@@ -107,15 +230,34 @@ function errorFingerprint(toolResponse) {
   }
   if (!text) return null;
   text = text.slice(0, 4000);
+  // ERROR_RE fallback covers tools that omit `is_error` entirely (text-only
+  // responses, third-party tools). Explicit `is_error: false` is honored as-is
+  // — the regex is NOT used to second-guess a tool that already declared success.
   const isError = toolResponse.is_error === true ||
     (toolResponse.is_error === undefined && ERROR_RE.test(text));
   if (!isError) return null;
-  const m = text.match(ERROR_RE);
-  const idx = m && typeof m.index === "number" ? m.index : 0;
-  const start = Math.max(0, idx - 20);
-  const slice = text.slice(start, start + 80).toLowerCase().replace(/\s+/g, " ").trim();
-  if (!slice) return null;
-  return djb2(slice);
+
+  // 1. Try canonical code (literal token first, then phrase mapping).
+  let code = null;
+  const codeMatch = text.match(ERROR_CODE_RE);
+  if (codeMatch && ERROR_CODES.has(codeMatch[1])) {
+    code = codeMatch[1];
+  } else {
+    for (const [re, mapped] of ERROR_PHRASE_MAP) {
+      if (re.test(text)) { code = mapped; break; }
+    }
+  }
+
+  // 2. When canonical code matched, the bucket key IS the code — residual
+  //    surface text (ports, hostnames, syscall names) varies across instances
+  //    of the same root cause, so we hash a fixed sentinel for stability.
+  //    When no code matched, normalize residual and hash it for the raw bucket.
+  if (code) {
+    return `${code}:${djb2(code)}`;
+  }
+  const normalized = normalizeErrorText(text);
+  if (!normalized) return null;
+  return `raw:${djb2(normalized)}`;
 }
 
 function resetFrictionCounters(state) {
@@ -163,6 +305,10 @@ function main() {
   const input = readStdin();
   if (!input || typeof input !== "object") return;
 
+  // Weekly rotation check at hook entry — ensures the active journal rolls over
+  // even if this invocation appends nothing.
+  rotateIfNeeded(JOURNAL);
+
   const event = input.hook_event_name;
   const session = input.session_id || "unknown";
   const cwd = input.cwd || process.cwd();
@@ -177,7 +323,7 @@ function main() {
 
   if (event === "UserPromptSubmit") {
     const prompt = (input.prompt || "").slice(0, 200);
-    if (CORRECTION_RE.test(prompt)) {
+    if (isCorrection(prompt)) {
       const last = state.tool_window[state.tool_window.length - 1] || {};
       appendJournal({
         ts, session, cwd, type: "correction",
@@ -348,5 +494,16 @@ function main() {
   safeWrite(STATE, state);
 }
 
-try { main(); } catch {}
-process.exit(0);
+// Run main only when executed as a script, not when imported for tests.
+// import.meta.url comparison is the standard ESM idiom.
+const isMain = (() => {
+  try {
+    return import.meta.url === `file://${process.argv[1]}`;
+  } catch { return true; }
+})();
+if (isMain) {
+  try { main(); } catch {}
+  process.exit(0);
+}
+
+export { errorFingerprint, normalizeErrorText, isCorrection };
