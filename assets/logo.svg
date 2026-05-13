@@ -1,18 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160" width="160" height="160" role="img" aria-label="claude-adam logo">
   <title>claude-adam</title>
-  <desc>A stylized letter A with a captured observation point inside its apex — the friction signal that ADAM watches for.</desc>
-  <defs>
-    <linearGradient id="adam-stroke" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="currentColor" stop-opacity="1"/>
-      <stop offset="100%" stop-color="currentColor" stop-opacity="0.78"/>
-    </linearGradient>
-  </defs>
-  <g fill="none" stroke="url(#adam-stroke)" stroke-width="11" stroke-linecap="round" stroke-linejoin="round">
-    <!-- Left leg + apex + right leg as one continuous stroke -->
-    <path d="M 28 134 L 80 22 L 132 134"/>
-    <!-- Crossbar — the feedback line -->
-    <path d="M 48 96 L 112 96"/>
-  </g>
-  <!-- Captured observation: the signal inside the upper triangle -->
-  <circle cx="80" cy="72" r="7" fill="currentColor"/>
+  <desc>A swaddled baby — rounded A-shape bundle with a face inside and small hands extending from the wrap-band. Named after the author's newborn son.</desc>
+  <!-- Swaddle bundle (rounded A) -->
+  <path d="M 36 134 Q 30 78 80 28 Q 130 78 124 134 Z" fill="none" stroke="currentColor" stroke-width="9" stroke-linejoin="round"/>
+  <!-- Wrap-band extended outward as little hands -->
+  <path d="M 16 100 L 44 100 Q 80 115 116 100 L 144 100" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round"/>
+  <!-- Face: eyes -->
+  <circle cx="72" cy="64" r="3.2" fill="currentColor"/>
+  <circle cx="88" cy="64" r="3.2" fill="currentColor"/>
+  <!-- Tiny mouth -->
+  <path d="M 75 78 Q 80 82 85 78" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
 </svg>
