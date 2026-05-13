@@ -1388,6 +1388,105 @@ else
   fi
 fi
 
+# --- Test 78: silent_drift fires after 5 consecutive read-only tools ---
+echo "Test 78: silent_drift after 5 reads"
+reset_state
+for i in 1 2 3 4 5; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/r-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sSD\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+assert_grep "$ROOT/journal.jsonl" '"type":"silent_drift"' "5 consecutive reads emit silent_drift"
+assert_grep "$ROOT/journal.jsonl" '"read_count":5' "silent_drift entry records read_count"
+
+# --- Test 79: silent_drift counter resets on action tool ---
+echo "Test 79: silent_drift counter resets on action tool"
+reset_state
+for i in 1 2 3 4; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/r-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sSDR\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+# Action tool — should reset
+echo '{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"/tmp/x"},"tool_response":{"content":"ok"},"session_id":"sSDR","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+for i in 1 2 3 4; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/rb-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sSDR\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+if grep -qE '"type":"silent_drift"' "$ROOT/journal.jsonl"; then
+  echo "  FAIL: silent_drift fired despite action tool reset"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: silent_drift suppressed by intervening action tool"; PASS=$((PASS+1))
+fi
+
+# --- Test 80: error_after_recovery fires when same fp returns post-clean_recovery ---
+echo "Test 80: error_after_recovery fires when fp returns after recovery"
+reset_state
+# Build a tool_error_loop with ENOENT
+for i in 1 2 3; do
+  echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat missing"},"tool_response":{"is_error":true,"content":"cat: missing: No such file or directory"},"session_id":"sEAR","cwd":"/tmp/x"}' \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+# 3 clean tools → clean_recovery
+for i in 1 2 3; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/ok-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sEAR\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+# Same fp returns within window
+echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat other"},"tool_response":{"is_error":true,"content":"cat: other: No such file or directory"},"session_id":"sEAR","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+assert_grep "$ROOT/journal.jsonl" '"type":"error_after_recovery"' "same fp after clean_recovery emits error_after_recovery"
+
+# --- Test 81: error_after_recovery does NOT fire after window expires ---
+echo "Test 81: error_after_recovery suppressed beyond window"
+reset_state
+for i in 1 2 3; do
+  echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat missing"},"tool_response":{"is_error":true,"content":"cat: missing: No such file or directory"},"session_id":"sEARW","cwd":"/tmp/x"}' \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+for i in 1 2 3; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/ok-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sEARW\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+# UserPromptSubmit resets tools_since_user + last_errors so the burn reads don't
+# trigger a secondary dead_end + clean_recovery cycle (which would create a fresh
+# recovery within window and cause error_after_recovery to fire legitimately).
+echo '{"hook_event_name":"UserPromptSubmit","prompt":"keep going","session_id":"sEARW","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+# Burn through the 5-event window with 6 clean reads (session_post_count: 6 → 12)
+for i in 1 2 3 4 5 6; do
+  echo "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"tool_input\":{\"file_path\":\"/tmp/burn-$i\"},\"tool_response\":{\"content\":\"ok\"},\"session_id\":\"sEARW\",\"cwd\":\"/tmp/x\"}" \
+    | HOOK_RUN >/dev/null 2>&1 || true
+done
+echo '{"hook_event_name":"PostToolUse","tool_name":"Bash","tool_input":{"command":"cat other"},"tool_response":{"is_error":true,"content":"cat: other: No such file or directory"},"session_id":"sEARW","cwd":"/tmp/x"}' \
+  | HOOK_RUN >/dev/null 2>&1 || true
+if grep -qE '"type":"error_after_recovery"' "$ROOT/journal.jsonl"; then
+  echo "  FAIL: error_after_recovery fired outside 5-event window"; FAIL=$((FAIL+1))
+else
+  echo "  PASS: error_after_recovery suppressed outside window"; PASS=$((PASS+1))
+fi
+
+# --- Test 82: adam-score.mjs reports severity_sum + severity_by_type ---
+echo "Test 82: severity-sum reporting in score.mjs"
+SEV_TMP="$(mktemp)"
+cat > "$SEV_TMP" <<'EOF'
+{"ts":"2026-05-12T10:00:00Z","session":"sSEV","type":"dead_end","count":64}
+{"ts":"2026-05-12T10:01:00Z","session":"sSEV","type":"edit_churn","count":8}
+{"ts":"2026-05-12T10:02:00Z","session":"sSEV","type":"tool_error_loop","count":3,"fp":"ENOENT:abc"}
+EOF
+out=$(SCORE_RUN --input "$SEV_TMP" 2>/dev/null)
+rm -f "$SEV_TMP"
+# Expected: dead_end 64/8=8, edit_churn 8/4=2, tool_error_loop 3/3=1 → sum=11
+if echo "$out" | grep -q '"severity_sum":11'; then
+  echo "  PASS: severity_sum=11 reported"; PASS=$((PASS+1))
+else
+  echo "  FAIL: severity_sum mismatch (got: $out)"; FAIL=$((FAIL+1))
+fi
+if echo "$out" | grep -q '"dead_end":8'; then
+  echo "  PASS: severity_by_type.dead_end=8"; PASS=$((PASS+1))
+else
+  echo "  FAIL: severity_by_type.dead_end missing/wrong (got: $out)"; FAIL=$((FAIL+1))
+fi
+
 echo
 echo "Results: $PASS passed, $FAIL failed"
 [ "$FAIL" = "0" ]

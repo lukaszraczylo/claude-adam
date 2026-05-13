@@ -38,6 +38,8 @@ Per-signal windows (single source of truth: `SIGNAL_WINDOWS_DAYS` in `~/.claude/
 | `build_loop` | 30 d | build/test failure patterns |
 | `weak_agent` | 30 d | subagent quality signal |
 | `subagent_dispatch_pattern` | 30 d | dispatch routing pattern |
+| `silent_drift` | 14 d | exploration-without-action is task-local |
+| `error_after_recovery` | 30 d | recovery-then-same-error patterns persist |
 | `correction_free_streak` | 60 d | wins accumulate slowly |
 | `clean_recovery` | 60 d | wins accumulate slowly |
 | `task_completed` | 60 d | recipe wins accumulate slowly |
@@ -59,6 +61,8 @@ The hook emits these `type` values into the journal:
 | `edit_churn` | same file edited 4× in window | file basename |
 | `build_loop` | 2 build/test/compile commands fail in session | session |
 | `subagent_dispatch_pattern` | same subagent dispatched ≥3× cumulatively | subagent_type |
+| `silent_drift` | 5 consecutive read-only PostToolUse without an action tool (reset on action or UserPromptSubmit) | `active_skills[0]` |
+| `error_after_recovery` | same error fingerprint returns within 5 PostToolUse of a `clean_recovery` | (`recovered_from`, `original_fp`) |
 | `correction_free_streak` | 5 clean UserPromptSubmits in a row (no correction phrase) | `active_skills[0]` |
 | `clean_recovery` | 3 clean PostToolUse events after a `tool_error_loop`/`dead_end`/`retry_loop` | (`recovered_from`, `active_skills[0]`) |
 | `task_completed` | UserPromptSubmit closes a run of ≥5 tool calls with ≥3 distinct tool kinds and 0 corrections | sorted `tool_kinds` tuple |
@@ -84,10 +88,17 @@ The hook emits these `type` values into the journal:
    - `edit_churn`: cluster by file basename pattern (e.g. `*.test.ts`).
    - `build_loop`: cluster by `session`.
    - `subagent_dispatch_pattern`: cluster by `subagent_type`.
+   - `silent_drift`: cluster by `active_skills[0]` (empty string when no skill is active).
+   - `error_after_recovery`: cluster by (`recovered_from`, `original_fp`).
    - `correction_free_streak`: cluster by `active_skills[0]`. Treat ≥3 streaks across ≥2 sessions naming the same skill as cross-session evidence.
    - `clean_recovery`: cluster by (`recovered_from`, `active_skills[0]`). A win cluster qualifies for `skill_edit` only when the named skill exists in `skills_root`.
    - `task_completed`: cluster by sorted `tool_kinds` tuple (the multi-tool recipe). Single entry qualifies for `skill_new` proposal (drafting protocol applies). Cross-session evidence requires ≥2 entries from distinct sessions with same tuple — without it, proposal queues, never auto-applies. Run the existing skill-overlap rule before drafting: if the recipe matches an existing skill's name/description tokens, route to `skill_edit` instead.
-5. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
+5. **Multi-axis correlation**: for each session that produced ≥2 distinct struggle types (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`, `silent_drift`, `error_after_recovery`), tag clusters from that session as `multi_axis: true`. This grants +1 confidence at scoring.
+
+5b. **Skill-attribution sub-clustering**: after primary clustering (step 4), for every struggle cluster (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`, `silent_drift`, `error_after_recovery`) that contains entries with non-empty `active_skills[0]`:
+   - Split into per-skill sub-clusters keyed on `active_skills[0]`. Entries with empty `active_skills` stay in the original cluster.
+   - If a sub-cluster has ≥3 entries AND names a skill that exists in `skills_root`, mark it as a candidate for `skill_edit` (struggle-driven variant; see "Struggle-driven `skill_edit` eligibility"). Otherwise treat the parent cluster normally.
+   - The umbrella cluster (cross-skill) still emits its usual proposal type (memory, etc.) — sub-clusters do NOT replace it, they supplement it.
 6. For each cluster qualifying under the rubric — ≥3 occurrences across ≥2 sessions, OR (for struggle types) ≥1 entry within a single session, OR (for `correction`) ≥3 occurrences across ≥2 cwds:
    a. If cluster topic matches a rejected idea via the rejected-ideas fuzzy set (≥2 token overlap with rejection's `# Why`), skip with reason `"rejected-similar"`.
    b. Pull ~20 messages of transcript context from `transcripts_root` to enrich. Never read full transcripts.
@@ -254,6 +265,21 @@ A `skill_edit` proposal sets `auto_apply_eligible: true` ONLY when ALL hold:
 
 If any of (3)–(9) fails: still emit the proposal, but `auto_apply_eligible: false` — main thread queues for review.
 
+## Struggle-driven `skill_edit` eligibility
+
+Skill-attribution sub-clustering (step 5b) produces struggle-driven `skill_edit` candidates: a sub-cluster of ≥3 struggle entries all naming the same `active_skills[0]` that exists in `skills_root`. These proposals are emitted but **ALWAYS queue** — `auto_apply_eligible: false` regardless of confidence. Negative evidence on a skill is a weaker basis for self-modification than positive evidence (the skill may be active during friction caused by something else), so the human reviews every one.
+
+A struggle-driven `skill_edit` proposal MUST:
+
+1. Set `target` to the matched skill's `SKILL.md` path.
+2. Cluster severity-sum ≥ 10 (same threshold as the +1 rubric bullet).
+3. Sub-cluster names exactly one skill (no ambiguity across distinct `active_skills[0]` values).
+4. `# Proposed change` is an append-only diff adding a `## When struggling` section (naive default body: a checkpoint-or-pause rule appropriate to the dominant signal — e.g. `dead_end` → "After 16 PostToolUse events without UserPromptSubmit, emit a one-line checkpoint summary before continuing.").
+5. Frontmatter includes `struggle_evidence: "<ts of one source entry naming this skill>"` and `struggle_signals: [<list of signal types in the sub-cluster>]`. The win-driven `win_evidence` field is omitted.
+6. Subject to the same Per-(skill, fingerprint) cooldown as win-driven `skill_edit`.
+
+If gate (2) or (3) fails: skip the sub-cluster (the parent cluster still produces its umbrella proposal). The sub-cluster's `source_entries` overlap with the parent's — the apply pipeline handles dedup via the excluded-timestamps set.
+
 ## Per-(skill, fingerprint) cooldown
 
 The cooldown gate is keyed on **(target_skill, proposal_fingerprint)** — not on target_skill alone. A rejected/applied proposal for skill `X` with fingerprint `A` does NOT block future proposals for skill `X` with fingerprint `B`.
@@ -307,9 +333,12 @@ The clustering trace summary (see §"Clustering trace") adds an extra `regressio
 
 Sum:
 - Signal repeated ≥3× across ≥2 sessions: **+2**
-- Struggle signal (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`) appearing ≥1× within a single session: **+2** *(each struggle entry already represents a hook-side threshold crossing — e.g. 8 tools without a prompt, 3 same-args retries, 4 edits to one file. Treat each entry as one piece of evidence. Does not stack with the cross-session bonus.)*
+- Struggle signal (`tool_error_loop`, `dead_end`, `weak_agent`, `retry_loop`, `edit_churn`, `build_loop`, `silent_drift`, `error_after_recovery`) appearing ≥1× within a single session: **+2** *(each struggle entry already represents a hook-side threshold crossing — e.g. 8 tools without a prompt, 3 same-args retries, 4 edits to one file, 5 read-only tools in a row, same-fp error after a recovery. Treat each entry as one piece of evidence. Does not stack with the cross-session bonus.)*
 - Transcript contains positive endorsement (`yes`, `exactly`, `do that`, `keep doing`) within 2 messages of related action: **+2**
 - Multi-axis cluster (≥2 distinct struggle types in same session): **+1**
+- Cluster severity-sum ≥ 10 (severity per entry = `max(1, floor(count / divisor))` using `SEVERITY_DIVISORS` from `adam-score.mjs` — `dead_end:8, edit_churn:4, tool_error_loop:3, retry_loop:3, weak_agent:2, build_loop:1`; entries without `count` count as 1): **+1**
+- Cluster severity-sum ≥ 32: **+1** *(additive — a severity-sum of 32 gets +1 from the previous bullet AND +1 here, total +2.)*
+- Skill-attributed sub-cluster (≥3 entries naming the same `active_skills[0]` that exists in `skills_root`): **+1**
 - Type-bias penalty from feedback loop (≥3 rejections, applied:rejected ratio <1:2 for this `type`): **-1**
 - Diagnosis flags `Mismatch: unclear` (causation could not be reconstructed from transcript context): **-1**
 - Blast radius: low **+1**, medium **0**, high **-1** (default per type — see Proposal types table)
@@ -328,7 +357,7 @@ Sum:
 |---|---|---|---|
 | `memory` | `~/.claude/projects/-Users-nvm/memory/*.md` | low | yes if conf≥4 AND cross_session |
 | `skill_new` | new dir under `~/.claude/skills/` | low | yes if conf≥4 AND cross_session |
-| `skill_edit` | existing skill file | medium | yes if win-evidence + LOC + cooldown gates all pass (see "Win-driven skill_edit eligibility") |
+| `skill_edit` | existing skill file | medium | yes (win-driven only) if win-evidence + LOC + cooldown gates all pass (see "Win-driven skill_edit eligibility"); struggle-driven variant ALWAYS queues (see "Struggle-driven skill_edit eligibility") |
 | `nudge` | append to `~/.claude/adam/active-nudges.json` | low | yes when `dead_end_count ≥ 3` in a single session (single-session evidence sufficient; skips cross-session gate). Does NOT modify skills/memories/CLAUDE.md — only seeds a SessionStart reminder for a future session. |
 | `reinforcement` | append entry to `~/.claude/adam/reinforcements.jsonl` | low | yes if conf≥4 AND blast_radius=low (same gate as memory). Applies via `adam-apply-reinforcement.mjs`; appends one JSONL entry, no code/memory/skill changes. |
 | `agent_new` | new file under `~/.claude/agents/` | medium | no |

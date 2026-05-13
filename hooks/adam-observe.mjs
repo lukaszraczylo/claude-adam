@@ -87,6 +87,12 @@ function normalizeErrorText(text) {
 const ERROR_RE = /\b(error|failed|exception|traceback|denied|cannot|unable to|not found|undefined|nullpointer|typeerror|syntaxerror|panic|fatal|enoent|econnrefused|etimedout|eaccess|segfault|crashed|uncaught)\b/i;
 const BUILD_RE = /\b(build|compile|make|gradle|cargo|tsc|webpack|vite|rollup|pytest|jest|mocha|vitest|go\s+test|npm\s+test|yarn\s+test|npm\s+run\s+build|yarn\s+build|ctest|ninja|bazel)\b/i;
 const EDIT_TOOLS = new Set(["Edit", "Write", "MultiEdit", "NotebookEdit"]);
+const READ_ONLY_TOOLS = new Set([
+  "Read", "Grep", "Glob", "ToolSearch", "WebFetch", "WebSearch",
+  "mcp__filepuff__file_read", "mcp__filepuff__file_search",
+  "mcp__filepuff__find_definition", "mcp__filepuff__find_references",
+  "mcp__filepuff__ast_query", "mcp__filepuff__symbol_at", "mcp__filepuff__ping",
+]);
 const WINDOW_SIZE = 10;
 const RETRY_THRESHOLD = 3;
 const AGENT_RESPAWN_THRESHOLD = 2;
@@ -98,6 +104,9 @@ const BUILD_LOOP_THRESHOLD = 2;
 const SUBAGENT_DISPATCH_THRESHOLD = 3;
 const CORRECTION_FREE_THRESHOLD = 5;
 const CLEAN_RECOVERY_WINDOW = 3;
+const SILENT_DRIFT_THRESHOLD = 5;
+const ERROR_AFTER_RECOVERY_WINDOW = 5;
+const RECENT_RECOVERIES_MAX = 3;
 const STRUGGLE_TYPES = new Set(["tool_error_loop", "dead_end", "retry_loop"]);
 const ACTIVE_SKILLS_LOOKBACK = 10;
 const TASK_TOOL_MIN = 5;
@@ -268,6 +277,8 @@ function resetFrictionCounters(state) {
   state.edit_churn_emitted = {};
   state.build_failure_count = 0;
   state.build_loop_emitted = false;
+  state.silentDriftCounter = 0;
+  state.silentDriftEmitted = false;
 }
 
 function resetSessionLocal(state) {
@@ -276,6 +287,8 @@ function resetSessionLocal(state) {
   state.subagent_dispatch_emitted = {};
   state.correctionFreeCounter = 0;
   state.recoveryWatch = null;
+  state.recentRecoveries = [];
+  state.session_post_count = 0;
   state.tool_window = [];
   state.task_tool_kinds = {};
   state.task_tool_count = 0;
@@ -299,6 +312,10 @@ function ensureStateDefaults(state) {
   if (!state.task_tool_kinds || typeof state.task_tool_kinds !== "object") state.task_tool_kinds = {};
   if (typeof state.task_tool_count !== "number") state.task_tool_count = 0;
   if (typeof state.task_corrections !== "number") state.task_corrections = 0;
+  if (typeof state.silentDriftCounter !== "number") state.silentDriftCounter = 0;
+  if (typeof state.silentDriftEmitted !== "boolean") state.silentDriftEmitted = false;
+  if (!Array.isArray(state.recentRecoveries)) state.recentRecoveries = [];
+  if (typeof state.session_post_count !== "number") state.session_post_count = 0;
 }
 
 function main() {
@@ -402,10 +419,22 @@ function main() {
     }
     state.tool_window.push(windowEntry);
     if (state.tool_window.length > WINDOW_SIZE) state.tool_window.shift();
+    state.session_post_count += 1;
 
     const sameToolArgs = state.tool_window.filter(e => e.tool === tool && e.argsHash === argsHash).length;
     if (sameToolArgs >= RETRY_THRESHOLD) {
       emit({ ts, session, cwd, type: "retry_loop", tool, count: sameToolArgs });
+    }
+
+    if (READ_ONLY_TOOLS.has(tool)) {
+      state.silentDriftCounter += 1;
+      if (state.silentDriftCounter >= SILENT_DRIFT_THRESHOLD && !state.silentDriftEmitted) {
+        emit({ ts, session, cwd, type: "silent_drift", read_count: state.silentDriftCounter, last_tool: tool });
+        state.silentDriftEmitted = true;
+      }
+    } else {
+      state.silentDriftCounter = 0;
+      state.silentDriftEmitted = false;
     }
 
     if (tool === "Agent") {
@@ -423,6 +452,23 @@ function main() {
     const fp = errorFingerprint(input.tool_response);
     if (fp) {
       bumpUsage("payload:tool_response_error_seen");
+      if (state.recentRecoveries.length) {
+        const keep = [];
+        for (const rec of state.recentRecoveries) {
+          const tools_since = state.session_post_count - rec.emitted_at_count;
+          if (tools_since > ERROR_AFTER_RECOVERY_WINDOW) continue;
+          if (Array.isArray(rec.fps) && rec.fps.includes(fp)) {
+            emit({
+              ts, session, cwd, type: "error_after_recovery",
+              recovered_from: rec.recovered_from, original_fp: fp,
+              tools_since_recovery: tools_since,
+            });
+            continue;
+          }
+          keep.push(rec);
+        }
+        state.recentRecoveries = keep;
+      }
       state.last_errors.push({ tool, fp });
       if (state.last_errors.length > ERROR_RING_SIZE) state.last_errors.shift();
       const sameError = state.last_errors.filter(e => e.fp === fp).length;
@@ -468,7 +514,13 @@ function main() {
     state.task_tool_kinds[tool] = (state.task_tool_kinds[tool] || 0) + 1;
 
     if (struggleEmittedThisTurn) {
-      state.recoveryWatch = { recovered_from: struggleEmittedThisTurn, since_ts: ts, clean_count: 0, window_tools: [] };
+      state.recoveryWatch = {
+        recovered_from: struggleEmittedThisTurn,
+        since_ts: ts,
+        clean_count: 0,
+        window_tools: [],
+        watched_fps: state.last_errors.map(e => e.fp),
+      };
     } else if (state.recoveryWatch) {
       const turnHadError = fp !== null;
       if (turnHadError) {
@@ -485,6 +537,12 @@ function main() {
             active_skills: activeNames(state, "skill"),
             active_agents: activeNames(state, "agent"),
           });
+          state.recentRecoveries.push({
+            recovered_from: state.recoveryWatch.recovered_from,
+            fps: state.recoveryWatch.watched_fps || [],
+            emitted_at_count: state.session_post_count,
+          });
+          if (state.recentRecoveries.length > RECENT_RECOVERIES_MAX) state.recentRecoveries.shift();
           state.recoveryWatch = null;
         }
       }

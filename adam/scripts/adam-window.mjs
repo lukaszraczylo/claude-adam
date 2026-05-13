@@ -29,6 +29,8 @@ export const SIGNAL_WINDOWS_DAYS = {
   build_loop: 30,
   weak_agent: 30,
   subagent_dispatch_pattern: 30,
+  silent_drift: 14,
+  error_after_recovery: 30,
   correction_free_streak: 60,
   clean_recovery: 60,
   task_completed: 60,

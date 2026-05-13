@@ -43,9 +43,31 @@ export const NEGATIVE_SIGNAL_TYPES = new Set([
   "retry_loop",
   "build_loop",
   "weak_agent",
+  "silent_drift",
+  "error_after_recovery",
 ]);
 
 export const REINFORCEMENT_THRESHOLD = 3;
+
+// Severity divisor per struggle signal type. Severity = max(1, floor(count / divisor)).
+// Entries without `count` default to severity 1. Source of truth — referenced by
+// agents/adam.md (Confidence rubric → severity-sum bullets).
+export const SEVERITY_DIVISORS = {
+  dead_end: 8,
+  edit_churn: 4,
+  tool_error_loop: 3,
+  retry_loop: 3,
+  weak_agent: 2,
+  build_loop: 1,
+};
+
+export function entrySeverity(entry) {
+  if (!entry || typeof entry !== "object") return 1;
+  const divisor = SEVERITY_DIVISORS[entry.type];
+  if (!divisor) return 1;
+  const count = typeof entry.count === "number" && entry.count > 0 ? entry.count : 1;
+  return Math.max(1, Math.floor(count / divisor));
+}
 
 function parseArgs(argv) {
   const args = { home: null, input: null, help: false };
@@ -84,11 +106,22 @@ export function computeSessionScores(entries) {
     const sid = e.session || e.session_id || "";
     if (!sid) continue;
     if (!bySession.has(sid)) {
-      bySession.set(sid, { session_id: sid, negative_count: 0, task_completed_count: 0 });
+      bySession.set(sid, {
+        session_id: sid,
+        negative_count: 0,
+        task_completed_count: 0,
+        severity_sum: 0,
+        severity_by_type: {},
+      });
     }
     const slot = bySession.get(sid);
     if (e.type === "task_completed") slot.task_completed_count++;
-    else if (NEGATIVE_SIGNAL_TYPES.has(e.type)) slot.negative_count++;
+    else if (NEGATIVE_SIGNAL_TYPES.has(e.type)) {
+      slot.negative_count++;
+      const sev = entrySeverity(e);
+      slot.severity_sum += sev;
+      slot.severity_by_type[e.type] = (slot.severity_by_type[e.type] || 0) + sev;
+    }
   }
   const out = [];
   for (const slot of bySession.values()) {
