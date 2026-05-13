@@ -66,39 +66,49 @@ curl -fsSL https://raw.githubusercontent.com/lukaszraczylo/claude-adam/v0.3.3/in
 
 ## How it works
 
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Observation (deterministic)                    │
-│                                                                     │
-│  Tool event / user prompt  ──▶  adam-observe.mjs  ──▶  journal.jsonl│
-│                                  (regex, counters,                  │
-│                                   ring buffers)                     │
-└─────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼  user runs  /reflect
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Analysis (LLM, only on demand)                 │
-│                                                                     │
-│  adam-window.mjs    ─▶ per-signal sliding window filter             │
-│  adam-score.mjs     ─▶ task_completed dampener + reinforcement      │
-│  adam-ab-measure.mjs─▶ 7d pre/post deltas on prior auto-applies     │
-│                                                                     │
-│                  ┌──────────────────┐                               │
-│   filtered ────▶ │  adam (subagent) │ ──▶  proposals/  +  trace     │
-│   inputs         │  cluster + score │      adam-explain.mjs renders │
-│                  └──────────────────┘                               │
-└─────────────────────────────────────────────────────────────────────┘
-                                       │
-                                       ▼
-┌─────────────────────────────────────────────────────────────────────┐
-│                      Review + apply                                 │
-│                                                                     │
-│  auto-apply gates  ──▶  applied/  +  ab-tracking.jsonl              │
-│  (low-blast only,                                                   │
-│   conf ≥ 4, etc.)                                                   │
-│                                                                     │
-│  everything else   ──▶  walk-the-queue: approve / reject / edit     │
-└─────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph OBS["Observation (deterministic, in-hook, zero LLM cost)"]
+        direction LR
+        EV["Tool event /<br/>user prompt"] --> OBSERVE["adam-observe.mjs<br/><sub>regex · counters · ring buffers</sub>"]
+        OBSERVE --> JOURNAL[("journal.jsonl<br/><sub>append-only signal log</sub>")]
+    end
+
+    JOURNAL -. user runs <code>/reflect</code> .-> ANALYSIS
+
+    subgraph ANALYSIS["Analysis (LLM, only on demand)"]
+        direction TB
+        subgraph PRE["Pre-processors (deterministic)"]
+            direction LR
+            W["adam-window.mjs<br/><sub>per-signal sliding window</sub>"]
+            S["adam-score.mjs<br/><sub>task_completed dampener<br/>+ reinforcement candidates</sub>"]
+            AB["adam-ab-measure.mjs<br/><sub>7d pre/post deltas<br/>on prior auto-applies</sub>"]
+        end
+        AGENT["adam subagent<br/><sub>cluster · score · diagnose</sub>"]
+        PRE --> AGENT
+        AGENT --> PROPOSALS[("proposals/")]
+        AGENT --> TRACE[["clustering trace<br/><sub>adam-explain.mjs renders</sub>"]]
+    end
+
+    PROPOSALS --> REVIEW
+
+    subgraph REVIEW["Review + apply"]
+        direction TB
+        GATE{"auto-apply<br/>gates pass?<br/><sub>conf≥4 · low blast<br/>· cooldown cool</sub>"}
+        GATE -->|yes| APPLIED[("applied/<br/>+ ab-tracking.jsonl")]
+        GATE -->|no| QUEUE["walk-the-queue<br/><sub>approve · reject · edit</sub>"]
+        QUEUE -->|approve| APPLIED
+        QUEUE -->|reject| REJECTED[("rejected/")]
+    end
+
+    APPLIED -. measures back into .-> AB
+
+    classDef store fill:#e8f4fd,stroke:#5b9bd5,stroke-width:2px,color:#1f3a5f
+    classDef proc fill:#fff4e6,stroke:#e8a33d,stroke-width:1px,color:#5a3d0f
+    classDef trace fill:#f0e8fd,stroke:#7e5dc0,stroke-width:1px,color:#2f1e60
+    class JOURNAL,PROPOSALS,APPLIED,REJECTED store
+    class EV,OBSERVE,W,S,AB,AGENT,QUEUE proc
+    class TRACE trace
 ```
 
 The observation layer is a 350-line Node hook. Pure regex, counters, ring buffers — no LLM in the hot path. Signals append one JSONL line per detection to `~/.claude/adam/journal.jsonl`.
